@@ -26,7 +26,7 @@ Whether you're debugging client websites, conducting competitive research, or au
 
 🔍 **WordPress Core & Theme Intelligence**
 • Accurately detects whether a site is built with WordPress.
-• Toolbar icon automatically illuminates vibrant orange on WordPress sites and dims on non-WordPress sites.
+• Toolbar icon automatically illuminates vibrant blue on WordPress sites and dims on non-WordPress sites.
 • Displays exact WordPress core version and Gutenberg block editor integration.
 • Identifies active theme name, version, author, child-theme inheritance, and 4:3 aspect-ratio theme screenshot (with a clean "No preview available" state when not hosted).
 
@@ -78,7 +78,7 @@ Whether you're debugging client websites, conducting competitive research, or au
 
 ### 💡 How to Use
 1. Navigate to any website.
-2. Notice the WPScout toolbar icon: it lights up vibrant orange on WordPress sites and dims on non-WordPress sites.
+2. Notice the WPScout toolbar icon: it lights up vibrant blue on WordPress sites and dims on non-WordPress sites.
 3. Click the WPScout icon in your Chrome toolbar.
 4. Instantly view the complete WordPress stack, inspect active plugins and theme details, and export or copy diagnostics as needed!
 
@@ -101,7 +101,7 @@ All submission assets have been generated at exact Chrome Web Store specificatio
 
 | Asset | Dimensions | Status | File Location | Description |
 |---|---|---|---|---|
-| **Store Icon** | 128×128 PNG | ✅ Ready | `store-assets/store-icon-128x128.png` | Vibrant orange scout lens icon on transparent background |
+| **Store Icon** | 128×128 PNG | ✅ Ready | `store-assets/store-icon-128x128.png` | Vibrant blue scout lens icon on transparent background |
 | **Small Promo Tile** | 440×280 PNG | ✅ Ready | `store-assets/promo-small-440x280.png` | Catalog search card with logo, typography, and feature pills |
 | **Marquee Promo Banner** | 1400×560 PNG | ✅ Ready | `store-assets/promo-marquee-1400x560.png` | Large featured header banner with mockup & key highlights |
 | **Screenshot 1 (Overview)** | 1280×800 PNG | ✅ Ready | `store-assets/screenshot-1-overview-1280x800.png` | Active theme, confidence score, and confirmed plugins list |

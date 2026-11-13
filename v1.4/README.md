@@ -1,4 +1,4 @@
-# WPScout - Scout Any WordPress Website (v1.4)
+# WPScout - Scout Any WordPress Website (v1.5.0)
 
 > **Scout Any WordPress Website.**
 >
@@ -10,7 +10,7 @@
 
 ### 1. Dynamic Dimming Icon (WPSNIFFER Style)
 - **Automatic Tab Awareness**: When browsing the web, the extension icon in Chrome's toolbar dynamically responds to the active tab:
-  - **WordPress Website**: The toolbar icon lights up in **vibrant orange radar** with active status.
+  - **WordPress Website**: The toolbar icon lights up in **vibrant blue radar** with active status.
   - **Non-WordPress Website / Browser Pages**: The toolbar icon automatically **dims to a subtle slate gray**, instantly letting you know if a site is running WordPress without needing to open the popup.
 - **Background Service Worker & Content Script**: A lightweight, non-blocking content script (`content.js`) and Manifest V3 background service worker (`background.js`) handle real-time tab status and icon switching with 0ms lag.
 

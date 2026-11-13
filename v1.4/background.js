@@ -1,7 +1,7 @@
 // ==========================================================================
 // WPScout - Background Service Worker
-// Dynamically toggles action icon between vibrant orange (WordPress)
-// and dimmed slate gray (Non-WordPress), matching WPSNIFFER behavior.
+// Dynamically toggles action icon between vibrant blue (WordPress)
+// and dimmed slate gray (Non-WordPress), matching brand identity.
 // ==========================================================================
 
 const ICONS_ACTIVE = {
@@ -149,7 +149,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 
 // 5. Global initialization on install or extension update
 chrome.runtime.onInstalled.addListener(async () => {
-  chrome.action.setIcon({ path: ICONS_DIMMED }).catch(() => {});
+  chrome.action.setIcon({ path: ICONS_ACTIVE }).catch(() => {});
   chrome.action.setTitle({ title: 'WPScout - Scout Any WordPress Website' }).catch(() => {});
 
   // Inspect existing open tabs immediately on install/reload

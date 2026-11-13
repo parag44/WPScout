@@ -15,6 +15,8 @@ async function detectWordPress() {
   let isUserLoggedIn = false;
   let pageBuilder = 'None Detected';
   let hasGutenberg = false;
+  let hostingPlatform = 'Unknown';
+  let ecommerce = 'None';
 
   const pluginsMap = new Map();
   const urlParams = new URL(document.location.href);
@@ -122,9 +124,9 @@ async function detectWordPress() {
       }
     }
 
-    // Active Theme Extraction from external URLs
-    const themeMatch = url.match(/\/wp-content\/themes\/([^\/]+)\//i);
-    if (themeMatch) {
+    // Active Theme Extraction from external URLs (Supports standard + concatenated combo URLs)
+    const themeMatches = url.matchAll(/\/wp-content\/themes\/([^\/,\?]+)\//gi);
+    for (const themeMatch of themeMatches) {
       const detectedTheme = themeMatch[1].toLowerCase();
       if (!['plugins', 'uploads', 'themes'].includes(detectedTheme)) {
         if (theme === 'Unknown') {
@@ -142,23 +144,25 @@ async function detectWordPress() {
       }
     }
 
-    // Plugin Assets Extraction
-    const pluginMatch = url.match(/\/wp-content\/plugins\/([^\/]+)\//i);
-    if (pluginMatch) {
-      const slug = pluginMatch[1];
-      let pVer = '';
-      const verMatch = url.match(/(?:\?|&)ver=([0-9a-zA-Z.-]+)/i);
-      if (verMatch && verMatch[1] !== version) pVer = verMatch[1];
+    // Plugin Assets Extraction (Handles Standard + VIP Combo Concatenated URLs like _static/??...)
+    const pluginMatches = url.matchAll(/\/wp-content\/plugins\/([^\/,\?]+)\//gi);
+    for (const pluginMatch of pluginMatches) {
+      const slug = pluginMatch[1].toLowerCase();
+      if (!['plugins', 'uploads', 'themes', 'mu-plugins', 'core'].includes(slug)) {
+        let pVer = '';
+        const verMatch = url.match(/(?:\?|&)ver=([0-9a-zA-Z.-]+)/i);
+        if (verMatch && verMatch[1] !== version) pVer = verMatch[1];
 
-      const existing = pluginsMap.get(slug);
-      if (!existing || (pVer && !existing.version)) {
-        pluginsMap.set(slug, {
-          slug,
-          version: pVer,
-          method: 'Frontend Asset',
-          sourceTag: 'URL',
-          evidence: url
-        });
+        const existing = pluginsMap.get(slug);
+        if (!existing || (pVer && !existing.version)) {
+          pluginsMap.set(slug, {
+            slug,
+            version: pVer,
+            method: 'Frontend Asset',
+            sourceTag: 'URL',
+            evidence: url.length > 95 ? url.substring(0, 95) + '...' : url
+          });
+        }
       }
     }
   });
@@ -238,6 +242,104 @@ async function detectWordPress() {
       }
     }
   });
+
+  // --- THIRD-PARTY EMBED & INTEGRATION SIGNATURES (HubSpot, Disqus, WooCommerce, Sailthru, Analytics) ---
+  const thirdPartySignatures = [
+    {
+      slug: 'hubspot',
+      name: 'HubSpot All-In-One Marketing',
+      category: 'Marketing',
+      check: () => {
+        if (window.hbspt || window._hsq) return 'window.hbspt object';
+        const scripts = document.querySelectorAll('script');
+        for (let i = 0; i < scripts.length && i < 35; i++) {
+          const t = scripts[i].textContent || '';
+          if (t.includes('hubspotPortalId') || t.includes('hs-scripts.com') || t.includes('js.hsforms.net')) {
+            return 'Inline script (hubspotPortalId / hs-scripts)';
+          }
+        }
+        return null;
+      }
+    },
+    {
+      slug: 'disqus-comment-system',
+      name: 'Disqus Comment System',
+      category: 'Comments',
+      check: () => {
+        if (window.disqus_shortname || window.disqus_config || window.DISQUS) return 'window.disqus_shortname';
+        if (document.getElementById('disqus_thread')) return '#disqus_thread container';
+        const scripts = document.querySelectorAll('script[src*="disqus.com"]');
+        if (scripts.length > 0) return scripts[0].src;
+        return null;
+      }
+    },
+    {
+      slug: 'woocommerce',
+      name: 'WooCommerce',
+      category: 'E-Commerce',
+      isEcom: true,
+      check: () => {
+        if (window.wc_add_to_cart_params || window.woocommerce_params) return 'window.wc_add_to_cart_params';
+        if (document.body && (document.body.classList.contains('woocommerce') || document.body.classList.contains('woocommerce-page'))) return 'body.woocommerce';
+        const scripts = document.querySelectorAll('script');
+        for (let i = 0; i < scripts.length && i < 35; i++) {
+          const t = scripts[i].textContent || '';
+          if (t.includes('isWooCommerceBlocksEnabled') || t.includes('woocommerce-blocks')) {
+            return 'WooCommerce Blocks integration config';
+          }
+        }
+        return null;
+      }
+    },
+    {
+      slug: 'sailthru-widget',
+      name: 'Sailthru for WordPress',
+      category: 'Marketing',
+      check: () => {
+        if (window.sailthru_vars || window.Sailthru) return 'window.sailthru_vars';
+        return null;
+      }
+    },
+    {
+      slug: 'google-analytics-for-wordpress',
+      name: 'MonsterInsights – Google Analytics Dashboard',
+      category: 'Analytics',
+      check: () => {
+        if (window.__gaTracker || window.monsterinsights_frontend) return 'window.monsterinsights_frontend';
+        return null;
+      }
+    },
+    {
+      slug: 'google-site-kit',
+      name: 'Site Kit by Google',
+      category: 'Analytics',
+      check: () => {
+        const meta = document.querySelector('meta[name="generator"][content*="Site Kit" i]');
+        if (meta) return meta.outerHTML;
+        return null;
+      }
+    }
+  ];
+
+  for (const item of thirdPartySignatures) {
+    if (!pluginsMap.has(item.slug)) {
+      try {
+        const evidence = item.check();
+        if (evidence) {
+          pluginsMap.set(item.slug, {
+            slug: item.slug,
+            version: '',
+            method: 'Integration Signature',
+            sourceTag: 'DOM',
+            evidence: String(evidence).substring(0, 80)
+          });
+          if (item.isEcom && ecommerce === 'None') {
+            ecommerce = item.name;
+          }
+        }
+      } catch (e) {}
+    }
+  }
 
   // --- MULTI-LAYER CASCADE THEME DETECTION (WPOPTIC-STYLE) ---
 
@@ -421,24 +523,57 @@ async function detectWordPress() {
       signals.linkHeader.detail = linkHeader.length > 80 ? linkHeader.substring(0, 80) + '...' : linkHeader;
     }
 
-    // Server Software & Proxy
+    // Server Software & Proxy / Edge CDN
     const rawServer = response.headers.get('server');
     if (rawServer) {
-      if (rawServer.toLowerCase().includes('cloudflare')) proxyCDN = 'Cloudflare';
-      else if (rawServer.toLowerCase().includes('sucuri')) proxyCDN = 'Sucuri';
-      else serverSoftware = rawServer;
+      const lServer = rawServer.toLowerCase();
+      if (lServer.includes('cloudflare')) {
+        proxyCDN = 'Cloudflare';
+        serverSoftware = 'Cloudflare (Edge Reverse Proxy)';
+      } else if (lServer.includes('sucuri')) {
+        proxyCDN = 'Sucuri';
+        serverSoftware = 'Sucuri Firewall';
+      } else if (lServer.includes('fastly')) {
+        proxyCDN = 'Fastly';
+        serverSoftware = 'Fastly CDN';
+      } else {
+        serverSoftware = rawServer;
+      }
     }
 
-    // PHP Version
-    const poweredBy = response.headers.get('x-powered-by');
-    if (poweredBy && poweredBy.toLowerCase().includes('php')) {
+    // Host & Platform Detection (x-powered-by, x-hacker, custom vendor headers)
+    const poweredBy = response.headers.get('x-powered-by') || '';
+    const xHacker = response.headers.get('x-hacker') || '';
+    const lPowered = poweredBy.toLowerCase();
+    const lHacker = xHacker.toLowerCase();
+
+    if (lPowered.includes('php')) {
       phpVersion = poweredBy;
     }
 
-    // Platform Overrides
-    if (response.headers.has('x-wpengine')) proxyCDN = 'WP Engine (Platform)';
-    if (response.headers.has('x-kinsta-cache')) proxyCDN = 'Kinsta (Platform)';
-    if (response.headers.has('x-pantheon-styx-edge-cache')) proxyCDN = 'Pantheon (Platform)';
+    if (lPowered.includes('wordpress vip') || lPowered.includes('wpvip') || lHacker.includes('viphacker') || lHacker.includes('a8c.com')) {
+      hostingPlatform = 'WordPress VIP';
+      if (serverSoftware === 'Unknown' || serverSoftware.includes('Cloudflare')) {
+        serverSoftware = 'WordPress VIP (Nginx / Edge)';
+      }
+    } else if (response.headers.has('x-wpengine') || response.headers.has('x-wpengine-cache') || lPowered.includes('wp engine')) {
+      hostingPlatform = 'WP Engine';
+      proxyCDN = proxyCDN !== 'None Detected' ? `${proxyCDN} (WP Engine)` : 'WP Engine EverCache';
+    } else if (response.headers.has('x-kinsta-cache') || lPowered.includes('kinsta')) {
+      hostingPlatform = 'Kinsta';
+      proxyCDN = proxyCDN !== 'None Detected' ? `${proxyCDN} (Kinsta Edge)` : 'Kinsta Cloud Platform';
+    } else if (response.headers.has('x-pantheon-styx-edge-cache') || response.headers.has('x-pantheon-endpoint') || lPowered.includes('pantheon')) {
+      hostingPlatform = 'Pantheon';
+      proxyCDN = 'Pantheon Styx Edge';
+    } else if (response.headers.has('x-flywheel-cache') || lPowered.includes('flywheel')) {
+      hostingPlatform = 'Flywheel';
+    } else if (response.headers.has('x-pressable') || lPowered.includes('pressable')) {
+      hostingPlatform = 'Pressable';
+    } else if (response.headers.has('x-siteground') || response.headers.has('x-sg-cache')) {
+      hostingPlatform = 'SiteGround';
+    } else if (response.headers.has('x-litespeed-cache') || (rawServer && rawServer.toLowerCase().includes('litespeed'))) {
+      if (hostingPlatform === 'Unknown') hostingPlatform = 'LiteSpeed Web Server';
+    }
 
     // Cache Headers
     for (const rule of knownCacheRules) {
@@ -564,7 +699,10 @@ async function detectWordPress() {
             if (!coreNamespaces.includes(prefix) && prefix.length > 1) {
               if (prefix === 'ldlms') prefix = 'sfwd-lms';
               if (prefix === 'yoast') prefix = 'wordpress-seo';
-              if (prefix === 'wc') prefix = 'woocommerce';
+              if (prefix === 'wc' || prefix.includes('woocommerce')) {
+                prefix = 'woocommerce';
+                ecommerce = 'WooCommerce';
+              }
 
               if (!pluginsMap.has(prefix)) {
                 pluginsMap.set(prefix, {
@@ -578,6 +716,42 @@ async function detectWordPress() {
             }
           }
         });
+
+        // Scan Individual REST Sub-routes for Deep Integration Signatures
+        if (restData.routes && typeof restData.routes === 'object') {
+          const routeKeys = Object.keys(restData.routes);
+          const knownRouteSignatures = [
+            { pattern: /\/hubspot\//i, slug: 'hubspot', name: 'HubSpot All-In-One Marketing', category: 'Marketing' },
+            { pattern: /\/newsletters?\//i, slug: 'newsletter', name: 'Newsletter', category: 'Marketing' },
+            { pattern: /\/disqus\//i, slug: 'disqus-comment-system', name: 'Disqus Comment System', category: 'Comments' },
+            { pattern: /\/(?:wc|woocommerce)\/|\/seen-wc-/i, slug: 'woocommerce', name: 'WooCommerce', category: 'E-Commerce', isEcom: true },
+            { pattern: /\/mailchimp/i, slug: 'mailchimp-for-woocommerce', name: 'Mailchimp for WordPress', category: 'Marketing' },
+            { pattern: /\/wpforms/i, slug: 'wpforms-lite', name: 'WPForms', category: 'Forms' },
+            { pattern: /\/gravityforms/i, slug: 'gravityforms', name: 'Gravity Forms', category: 'Forms' },
+            { pattern: /\/wordfence/i, slug: 'wordfence', name: 'Wordfence Security', category: 'Security' },
+            { pattern: /\/rankmath/i, slug: 'seo-by-rank-math', name: 'Rank Math SEO', category: 'SEO' },
+            { pattern: /\/redirection/i, slug: 'redirection', name: 'Redirection', category: 'SEO' },
+            { pattern: /\/elementor/i, slug: 'elementor', name: 'Elementor Website Builder', category: 'Blocks' }
+          ];
+
+          for (const sig of knownRouteSignatures) {
+            if (!pluginsMap.has(sig.slug)) {
+              const matchedRoute = routeKeys.find(r => sig.pattern.test(r));
+              if (matchedRoute) {
+                pluginsMap.set(sig.slug, {
+                  slug: sig.slug,
+                  version: 'REST API',
+                  method: 'REST API Sub-route',
+                  sourceTag: 'API',
+                  evidence: `${origin}/wp-json${matchedRoute}`
+                });
+                if (sig.isEcom && ecommerce === 'None') {
+                  ecommerce = sig.name;
+                }
+              }
+            }
+          }
+        }
       }
     }
   } catch (e) {}
@@ -600,6 +774,9 @@ async function detectWordPress() {
   // Categorize Plugins & Normalize Titles
   function categorizePlugin(slug) {
     const s = slug.toLowerCase();
+    if (s.includes('player') || s.includes('video') || s.includes('media') || s.includes('audio') || s.includes('jw-player')) return 'Media';
+    if (s.includes('market') || s.includes('mail') || s.includes('campaign') || s.includes('newsletter') || s.includes('sailthru') || s.includes('hubspot') || s === 'leadin') return 'Marketing';
+    if (s.includes('comment') || s.includes('disqus')) return 'Comments';
     if (s.includes('lms') || s.includes('tutor') || s.includes('course') || s.includes('learn') || s.includes('academy') || s.includes('sensei') || s.includes('lifter')) return 'LMS';
     if (s.includes('form') || s === 'contact-form-7' || s === 'gravityforms' || s === 'wpforms') return 'Forms';
     if (s.includes('seo') || s.includes('schema') || s === 'wordpress-seo') return 'SEO';
@@ -609,11 +786,37 @@ async function detectWordPress() {
     if (s.includes('elementor') || s.includes('builder') || s.includes('blocks') || s.includes('block') || s.includes('gutenberg') || s.includes('accordion')) return 'Blocks';
     if (s.includes('analytics') || s.includes('parsely') || s.includes('pixel') || s.includes('track')) return 'Analytics';
     if (s.includes('access') || s.includes('wcag') || s.includes('ada')) return 'Accessibility';
+    if (s === 'vip' || s === 'cron-control' || s === 'content-connect' || s === 'wpcom') return 'Platform';
     return 'Plugin';
   }
 
   function formatPluginName(slug) {
     const knownNames = {
+      'jw-player-7-for-wp-premium': 'JW Player for WordPress Premium',
+      'jw-player': 'JW Player for WordPress',
+      'sailthru-widget': 'Sailthru for WordPress',
+      'hubspot': 'HubSpot All-In-One Marketing',
+      'leadin': 'HubSpot All-In-One Marketing',
+      'disqus-comment-system': 'Disqus Comment System',
+      'disqus': 'Disqus Comment System',
+      'newsletter': 'Newsletter – Email Marketing',
+      'coauthors': 'Co-Authors Plus',
+      'co-authors-plus': 'Co-Authors Plus',
+      'apple-news': 'Apple News',
+      'elasticpress': 'ElasticPress',
+      'cron-control': 'Cron Control (VIP)',
+      'vip': 'WordPress VIP Platform Client',
+      'content-connect': 'Content Connect (VIP)',
+      'simple-page-ordering': 'Simple Page Ordering',
+      'tc': 'TechCrunch Core Features',
+      'tc-deployment': 'TechCrunch Deployment Manager',
+      'two-factor': 'Two Factor',
+      'zapier': 'Zapier for WordPress',
+      'my-jetpack': 'My Jetpack',
+      'jetpack-boost': 'Jetpack Boost',
+      'jetpack': 'Jetpack – Security, Backup & Speed',
+      'akismet': 'Akismet Anti-spam: Spam Protection',
+      'wpcom': 'WordPress.com Platform Integration',
       'tutor': 'Tutor LMS',
       'tutor-pro': 'Tutor LMS Pro',
       'advanced-accordion-block': 'Advanced Accordion Gutenberg Block',
@@ -637,7 +840,13 @@ async function detectWordPress() {
       'acf-pro': 'Advanced Custom Fields Pro',
       'accessibility-checker': 'Equalize Digital Accessibility Checker',
       'wordfence': 'Wordfence Security',
-      'updraftplus': 'UpdraftPlus Backup'
+      'updraftplus': 'UpdraftPlus Backup',
+      'google-analytics-for-wordpress': 'MonsterInsights – Google Analytics',
+      'google-site-kit': 'Site Kit by Google',
+      'duracelltomi-google-tag-manager': 'GTM4WP – Google Tag Manager for WordPress',
+      'mailchimp-for-woocommerce': 'Mailchimp for WooCommerce',
+      'wpforms-lite': 'WPForms',
+      'redirection': 'Redirection'
     };
     if (knownNames[slug]) return knownNames[slug];
     return slug.split('-').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
@@ -673,6 +882,8 @@ async function detectWordPress() {
     isUserLoggedIn,
     pageBuilder,
     hasGutenberg,
+    hostingPlatform,
+    ecommerce,
     serverSoftware,
     proxyCDN,
     phpVersion,
@@ -692,7 +903,6 @@ async function detectWordPress() {
 
 document.addEventListener('DOMContentLoaded', async () => {
   let reportData = null;
-  let activeFilter = 'all';
 
   // DOM Elements
   const els = {
@@ -717,11 +927,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // --- Theme Toggle (Dark/Light) with OS Preference Detection ---
   let savedTheme = localStorage.getItem('wp_detector_theme');
-  if (window.location.search.includes('light') || window.location.hash.includes('light')) {
-    savedTheme = 'theme-light';
-  } else if (window.location.search.includes('dark') || window.location.hash.includes('dark')) {
-    savedTheme = 'theme-dark';
-  } else if (!savedTheme) {
+  if (!savedTheme) {
     savedTheme = window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches ? 'theme-light' : 'theme-dark';
   }
   document.body.className = savedTheme;
@@ -731,12 +937,17 @@ document.addEventListener('DOMContentLoaded', async () => {
     const newTheme = isDark ? 'theme-light' : 'theme-dark';
     document.body.className = newTheme;
     localStorage.setItem('wp_detector_theme', newTheme);
-    showToast(`Switched to ${isDark ? 'Light' : 'Dark'} mode`);
   });
 
   // --- Tab Navigation ---
   function switchTab(tabId) {
-    if (tabId === 'server') tabId = 'hosting';
+    if (tabId === 'plugins') {
+      tabId = 'overview';
+      setTimeout(() => {
+        document.getElementById('plugins-section')?.scrollIntoView({ behavior: 'smooth' });
+        document.getElementById('plugin-search')?.focus();
+      }, 50);
+    }
     els.tabs.forEach(t => {
       const active = t.getAttribute('data-tab') === tabId;
       t.classList.toggle('active', active);
@@ -755,46 +966,16 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   });
 
-  // Theme Deep Dive Modal Handlers
-  function openThemeModal() {
-    document.getElementById('theme-modal')?.classList.remove('hidden');
-  }
-  function closeThemeModal() {
-    document.getElementById('theme-modal')?.classList.add('hidden');
-  }
-  document.getElementById('btn-goto-theme')?.addEventListener('click', openThemeModal);
-  document.getElementById('card-click-theme')?.addEventListener('click', openThemeModal);
-  document.getElementById('btn-close-theme-modal')?.addEventListener('click', closeThemeModal);
-  document.getElementById('theme-modal')?.addEventListener('click', (e) => {
-    if (e.target && e.target.id === 'theme-modal') closeThemeModal();
-  });
-
   // Quick navigation shortcuts from Overview cards
-  document.getElementById('card-click-plugins')?.addEventListener('click', () => switchTab('plugins'));
+  document.getElementById('card-click-plugins')?.addEventListener('click', () => {
+    switchTab('overview');
+    document.getElementById('plugins-section')?.scrollIntoView({ behavior: 'smooth' });
+    document.getElementById('plugin-search')?.focus();
+  });
+  document.getElementById('card-click-theme')?.addEventListener('click', () => switchTab('theme'));
   document.getElementById('card-click-signals')?.addEventListener('click', () => switchTab('signals'));
-  document.getElementById('card-click-confidence')?.addEventListener('click', () => switchTab('signals'));
+  document.getElementById('btn-goto-theme')?.addEventListener('click', () => switchTab('theme'));
   document.getElementById('btn-goto-hosting')?.addEventListener('click', () => switchTab('hosting'));
-
-  // Copy IP inline button
-  document.getElementById('btn-copy-ip')?.addEventListener('click', () => {
-    const ip = document.getElementById('host-ip')?.textContent?.trim();
-    if (ip && ip !== '...') {
-      navigator.clipboard.writeText(ip).then(() => showToast(`Copied IP: ${ip}`));
-    }
-  });
-
-  // Export plugins button
-  document.getElementById('btn-export-plugins')?.addEventListener('click', () => {
-    if (!reportData) return;
-    const blob = new Blob([JSON.stringify(reportData.plugins, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `wpscout-plugins-${new URL(reportData.url).hostname}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
-    showToast('Exported plugins JSON');
-  });
 
   // Optional hash-based tab activation (e.g. #plugins, #theme)
   const initialHash = (window.location.hash || '').replace('#', '').toLowerCase();
@@ -848,9 +1029,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   function showToast(msg) {
-    const msgEl = document.getElementById('toast-message');
-    if (msgEl) msgEl.textContent = msg;
-    else els.toast.textContent = msg;
+    els.toast.textContent = msg;
     els.toast.classList.remove('hidden');
     setTimeout(() => els.toast.classList.add('hidden'), 2200);
   }
@@ -874,6 +1053,8 @@ document.addEventListener('DOMContentLoaded', async () => {
       isUserLoggedIn: false,
       pageBuilder: 'Gutenberg (Block Editor)',
       hasGutenberg: true,
+      hostingPlatform: 'WordPress VIP',
+      ecommerce: 'None',
       serverSoftware: 'nginx/1.26.1',
       proxyCDN: 'WordPress VIP (Automattic)',
       phpVersion: 'PHP/8.2.30',
@@ -918,7 +1099,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   // --- Empty / Non-WordPress State Handler ---
-  function showEmptyState(title, desc, pillText = 'No Signatures', isInternal = false) {
+  function showEmptyState(title, desc, pillText = 'No Signatures', isInternal = false, tab = null) {
     els.loading.classList.add('hidden');
     els.empty.classList.remove('hidden');
 
@@ -950,28 +1131,74 @@ document.addEventListener('DOMContentLoaded', async () => {
     const pillApi = document.getElementById('pill-rest-api');
 
     if (pillWp) {
-      pillWp.className = 'status-pill pill-neutral';
+      pillWp.className = isInternal ? 'status-pill pill-neutral status-internal' : 'status-pill pill-neutral status-nonwp';
       if (pillWpText) pillWpText.textContent = isInternal ? 'BROWSER PAGE' : 'NON-WORDPRESS';
     }
     if (pillVer) pillVer.classList.add('hidden');
     if (pillGut) pillGut.classList.add('hidden');
     if (pillApi) pillApi.classList.add('hidden');
 
+    // Favicon handling
+    if (els.siteFavicon) {
+      if (isInternal) {
+        els.siteFavicon.src = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%236366F1' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z'/%3E%3C/svg%3E";
+      } else if (tab && tab.favIconUrl) {
+        els.siteFavicon.src = tab.favIconUrl;
+        els.siteFavicon.onerror = () => {
+          if (tab.url) {
+            try {
+              const u = new URL(tab.url);
+              els.siteFavicon.src = `https://www.google.com/s2/favicons?domain=${encodeURIComponent(u.hostname)}&sz=32`;
+            } catch(e) {}
+          }
+        };
+      } else if (tab && tab.url) {
+        try {
+          const u = new URL(tab.url);
+          els.siteFavicon.src = `https://www.google.com/s2/favicons?domain=${encodeURIComponent(u.hostname)}&sz=32`;
+        } catch(e) {}
+      }
+    }
+
     // Update empty card content
     const emptyTitle = document.getElementById('empty-title');
     const emptyDesc = document.getElementById('empty-desc');
     const emptyPill = document.getElementById('empty-pill');
+    const emptyIconWrap = document.getElementById('empty-icon-wrap');
+    const emptyIconNonwp = document.getElementById('empty-icon-nonwp');
+    const emptyIconInternal = document.getElementById('empty-icon-internal');
     const emptyChecklist = document.getElementById('empty-checklist');
+    const emptyInternalNotice = document.getElementById('empty-internal-notice');
+    const emptyActionsNonwp = document.getElementById('empty-actions-nonwp');
+    const emptyActionsInternal = document.getElementById('empty-actions-internal');
 
     if (emptyTitle) emptyTitle.textContent = title;
     if (emptyDesc) emptyDesc.textContent = desc;
     if (emptyPill) emptyPill.textContent = pillText;
-    if (emptyChecklist) {
+
+    if (emptyIconWrap) {
       if (isInternal) {
-        emptyChecklist.classList.add('hidden');
+        emptyIconWrap.className = 'empty-hero-icon-wrap theme-internal';
+        if (emptyIconNonwp) emptyIconNonwp.classList.add('hidden');
+        if (emptyIconInternal) emptyIconInternal.classList.remove('hidden');
       } else {
-        emptyChecklist.classList.remove('hidden');
+        emptyIconWrap.className = 'empty-hero-icon-wrap theme-nonwp';
+        if (emptyIconNonwp) emptyIconNonwp.classList.remove('hidden');
+        if (emptyIconInternal) emptyIconInternal.classList.add('hidden');
       }
+    }
+
+    if (emptyChecklist) {
+      emptyChecklist.classList.toggle('hidden', isInternal);
+    }
+    if (emptyInternalNotice) {
+      emptyInternalNotice.classList.toggle('hidden', !isInternal);
+    }
+    if (emptyActionsNonwp) {
+      emptyActionsNonwp.classList.toggle('hidden', isInternal);
+    }
+    if (emptyActionsInternal) {
+      emptyActionsInternal.classList.toggle('hidden', !isInternal);
     }
   }
 
@@ -1005,57 +1232,44 @@ document.addEventListener('DOMContentLoaded', async () => {
       els.siteFavicon.onerror = () => { els.siteFavicon.src = '../icons/icon-48.png'; };
     }
 
-    // Sub Status Bar & Quick Tags
+    // Sub Status Bar
     const pillWp = document.getElementById('pill-wp-status');
     const pillWpText = document.getElementById('pill-wp-text');
-    const pillWpDot = document.getElementById('pill-wp-dot');
-    if (pillWp) pillWp.className = 'wp-badge badge-wp';
-    if (pillWpText) pillWpText.textContent = 'WordPress';
-    if (pillWpDot) pillWpDot.className = 'status-pulse-dot';
+    if (pillWp) pillWp.className = 'status-pill status-wp';
+    if (pillWpText) pillWpText.textContent = 'WORDPRESS';
 
     const pillVer = document.getElementById('pill-core-version');
     if (pillVer) {
       pillVer.classList.remove('hidden');
-      pillVer.textContent = data.version && data.version !== 'Unknown' ? `v${data.version}` : 'vHidden';
-    }
-
-    const pillCdn = document.getElementById('pill-cdn-badge');
-    if (pillCdn) {
-      const edge = data.proxyCDN !== 'None Detected' ? data.proxyCDN : (data.isp || 'Edge Network');
-      pillCdn.textContent = edge.replace(/\s*\(Automattic\)/, '');
-      pillCdn.classList.remove('hidden');
-    }
-
-    const pillTheme = document.getElementById('pill-theme-badge');
-    if (pillTheme) {
-      pillTheme.textContent = data.isChildTheme ? 'Child Theme' : (data.isBlockTheme ? 'Block Theme' : 'Theme');
-      pillTheme.classList.remove('hidden');
+      pillVer.textContent = data.version !== 'Unknown' ? `v${data.version}` : 'Version Hidden';
     }
 
     const gutenbergPill = document.getElementById('pill-gutenberg');
-    if (gutenbergPill) {
-      if (data.hasGutenberg) gutenbergPill.classList.remove('hidden');
-      else gutenbergPill.classList.add('hidden');
-    }
+    if (data.hasGutenberg) gutenbergPill.classList.remove('hidden');
+    else gutenbergPill.classList.add('hidden');
 
     const restPill = document.getElementById('pill-rest-api');
-    if (restPill) {
-      if (data.signals.api.detected) restPill.classList.remove('hidden');
-      else restPill.classList.add('hidden');
+    if (data.signals.api.detected) restPill.classList.remove('hidden');
+    else restPill.classList.add('hidden');
+
+    const pillEcom = document.getElementById('pill-ecommerce');
+    if (pillEcom) {
+      if (data.ecommerce && data.ecommerce !== 'None') {
+        pillEcom.classList.remove('hidden');
+        pillEcom.textContent = data.ecommerce;
+      } else {
+        pillEcom.classList.add('hidden');
+      }
     }
 
-    // Activate requested tab or default to Overview
-    const hash = (window.location.hash || '').replace('#', '').replace(/(light|dark)/g, '').trim();
-    const initialTab = ['overview', 'hosting', 'server', 'plugins', 'signals'].includes(hash) ? (hash === 'server' ? 'hosting' : hash) : 'overview';
-    switchTab(initialTab);
+    // Activate Overview tab
+    switchTab('overview');
 
     // Overview 4 Metric Cards
     document.getElementById('metric-confidence').textContent = data.confidence;
     document.getElementById('metric-plugins').textContent = data.plugins.length;
     const ovPlCount = document.getElementById('overview-plugins-count');
     if (ovPlCount) ovPlCount.textContent = data.plugins.length;
-    const allPlCount = document.getElementById('all-plugins-count');
-    if (allPlCount) allPlCount.textContent = data.plugins.length;
     const tabPlCount = document.getElementById('tab-plugins-count');
     if (tabPlCount) tabPlCount.textContent = data.plugins.length;
     const chipAll = document.getElementById('chip-all-count');
@@ -1064,21 +1278,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.getElementById('metric-theme-name').textContent = data.theme !== 'Unknown' ? displayTheme : 'Theme';
     document.getElementById('metric-signals-count').textContent = `${data.signalScore} / 7`;
     document.getElementById('tab-signals-score').textContent = `${data.signalScore}/7`;
-    const sigScoreHdr = document.getElementById('signals-score-header');
-    if (sigScoreHdr) sigScoreHdr.textContent = `${data.signalScore}/7`;
-    const sigCircle = document.getElementById('signals-score-circle');
-    if (sigCircle) sigCircle.textContent = data.signalScore;
+    document.getElementById('signals-score-circle').textContent = data.signalScore;
 
     // Overview Theme Summary Card
     document.getElementById('overview-theme-name').textContent = data.theme !== 'Unknown' ? displayTheme : 'Active Theme';
     document.getElementById('overview-theme-version').textContent = data.themeVersion ? `v${data.themeVersion}` : 'Active';
     document.getElementById('overview-theme-author').textContent = data.themeAuthor ? `By ${data.themeAuthor}` : `Slug: ${data.theme}`;
-    const ovThemeBadge = document.getElementById('overview-theme-badge');
-    if (ovThemeBadge) ovThemeBadge.textContent = data.isChildTheme ? 'Child Theme' : (data.isBlockTheme ? 'Block Theme' : 'Theme');
-    const plTitle = document.getElementById('theme-placeholder-title');
-    if (plTitle) plTitle.textContent = displayTheme.toUpperCase();
-    const ovStatusLabel = document.getElementById('overview-theme-status-label');
-    if (ovStatusLabel) ovStatusLabel.textContent = data.theme !== 'Unknown' ? 'Active Theme Stack' : 'Proprietary Build';
 
     // Theme Thumbnail in Overview
     const themeCandidates = getThemeScreenshotCandidates(data);
@@ -1101,7 +1306,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const ipEl = document.getElementById('overview-ip');
     if (ipEl) ipEl.textContent = data.ip;
 
-    // --- Tab 3: Theme Hero Card / Modal ---
+    // --- Tab 3: Theme Hero Card ---
     document.getElementById('theme-big-title').textContent = data.theme !== 'Unknown' ? displayTheme : 'Custom Theme';
     document.getElementById('theme-pill-slug').textContent = `Slug: ${data.theme}`;
     document.getElementById('theme-pill-ver').textContent = data.themeVersion ? `v${data.themeVersion}` : 'Version unknown';
@@ -1131,8 +1336,6 @@ document.addEventListener('DOMContentLoaded', async () => {
           if (specName) specName.textContent = styleMeta.name;
           const fbName = document.getElementById('theme-fallback-name');
           if (fbName) fbName.textContent = styleMeta.name;
-          const plTitle2 = document.getElementById('theme-placeholder-title');
-          if (plTitle2) plTitle2.textContent = styleMeta.name.toUpperCase();
         }
         if (styleMeta.version && (!data.themeVersion || data.themeVersion === 'Active')) {
           const ovVer = document.getElementById('overview-theme-version');
@@ -1164,8 +1367,6 @@ document.addEventListener('DOMContentLoaded', async () => {
           if (specName) specName.textContent = meta.name;
           const fbName = document.getElementById('theme-fallback-name');
           if (fbName) fbName.textContent = meta.name;
-          const plTitle3 = document.getElementById('theme-placeholder-title');
-          if (plTitle3) plTitle3.textContent = meta.name.toUpperCase();
         }
         if (meta.version && (!data.themeVersion || data.themeVersion === 'Active')) {
           const ovVer = document.getElementById('overview-theme-version');
@@ -1191,74 +1392,46 @@ document.addEventListener('DOMContentLoaded', async () => {
       document.getElementById('theme-wp-link').href = `https://wordpress.org/themes/${data.theme}/`;
     }
 
-    // --- Tab 2: Server & Network ---
+    // --- Tab 4: Hosting & Server Table ---
+    const hostPlatformEl = document.getElementById('host-platform');
+    if (hostPlatformEl) {
+      hostPlatformEl.textContent = data.hostingPlatform && data.hostingPlatform !== 'Unknown' ? data.hostingPlatform : 'Standard Host';
+    }
     document.getElementById('host-ip').textContent = data.ip;
     document.getElementById('host-isp').textContent = data.isp || 'Detecting...';
     document.getElementById('host-location').textContent = data.location || 'Unknown';
-    document.getElementById('host-server').textContent = data.serverSoftware && data.serverSoftware !== 'Unknown' ? data.serverSoftware : 'Unknown (Proxy Masked)';
+    document.getElementById('host-server').textContent = data.serverSoftware;
+    const hostEcommerceEl = document.getElementById('host-ecommerce');
+    if (hostEcommerceEl) {
+      hostEcommerceEl.textContent = data.ecommerce && data.ecommerce !== 'None' ? data.ecommerce : 'None Detected';
+    }
     const hostBuilder = document.getElementById('host-builder');
-    if (hostBuilder) hostBuilder.textContent = data.pageBuilder || 'None Detected (Native Blocks)';
-    const hostCdnText = document.getElementById('host-cdn-text');
-    if (hostCdnText) hostCdnText.textContent = data.proxyCDN !== 'None Detected' ? data.proxyCDN : 'None Detected';
+    if (hostBuilder) hostBuilder.textContent = data.pageBuilder;
+    document.getElementById('host-cdn').textContent = data.proxyCDN;
     const hostCacheBadge = document.getElementById('host-cache-badge');
-    if (hostCacheBadge) {
-      hostCacheBadge.textContent = data.cacheSystem !== 'None Detected' ? `${data.cacheSystem}: ${data.cacheHeaderStatus}` : data.cacheHeaderStatus;
-      hostCacheBadge.className = 'badge-tag-cache ' + (data.cacheHeaderStatus === 'HIT' ? 'tag-emerald' : data.cacheHeaderStatus === 'BYPASS' ? 'tag-amber' : 'tag-neutral');
-    }
-    document.getElementById('host-php').textContent = data.phpVersion || 'Hidden by Edge';
+    hostCacheBadge.textContent = data.cacheSystem !== 'None Detected' ? `${data.cacheSystem}: ${data.cacheHeaderStatus}` : data.cacheHeaderStatus;
+    hostCacheBadge.className = 'status-pill ' + (data.cacheHeaderStatus === 'HIT' ? 'pill-green' : data.cacheHeaderStatus === 'BYPASS' ? 'pill-amber' : 'pill-neutral');
+    document.getElementById('host-php').textContent = data.phpVersion;
+    document.getElementById('host-dns').innerHTML = (data.dns || 'Unknown').replace(/, /g, '<br>');
 
-    const hostDns = document.getElementById('host-dns');
-    if (hostDns) {
-      if (data.dns && data.dns !== 'Unknown') {
-        const records = data.dns.split(',').map(s => s.trim()).filter(Boolean);
-        hostDns.innerHTML = records.map(r => `
-          <div style="display:flex;align-items:center;justify-content:space-between;padding:2px 0;">
-            <span class="truncate">${r}</span>
-            <span style="color:#10b981;font-size:10px;font-weight:600;">Active</span>
-          </div>
-        `).join('');
-        const dnsCount = document.getElementById('host-dns-count');
-        if (dnsCount) dnsCount.textContent = `${records.length} Records`;
-      } else {
-        hostDns.innerHTML = '<div style="color:var(--text-dim);">Unknown / Hidden</div>';
-        const dnsCount = document.getElementById('host-dns-count');
-        if (dnsCount) dnsCount.textContent = '0 Records';
-      }
-    }
-
-    // --- Tab 4: Detection Signals Checklist ---
-    const sigMap = [
-      { key: 'wpContent', id: 'sig-wp-content' },
-      { key: 'wpIncludes', id: 'sig-wp-includes' },
-      { key: 'gutenberg', id: 'sig-gutenberg', detected: data.hasGutenberg, detail: 'Gutenberg core blocks found in DOM' },
-      { key: 'api', id: 'sig-api' },
-      { key: 'linkHeader', id: 'sig-link-header' },
-      { key: 'linkRel', id: 'sig-link-rel' },
-      { key: 'generator', id: 'sig-generator' },
-      { key: 'adminPaths', id: 'sig-admin-paths' }
-    ];
-
-    sigMap.forEach(item => {
-      const sig = data.signals[item.key] || item;
-      const itemEl = document.getElementById(item.id);
+    // --- Tab 5: Detection Signals Checklist ---
+    const sigKeys = ['api', 'linkHeader', 'generator', 'wpContent', 'wpIncludes', 'linkRel', 'adminPaths'];
+    sigKeys.forEach(key => {
+      const sig = data.signals[key];
+      const itemEl = document.getElementById(sig.id);
       if (itemEl) {
-        const dot = itemEl.querySelector('.sig-dot');
-        const tag = itemEl.querySelector('.sig-tag-status');
-        const detailEl = itemEl.querySelector('.sig-evidence');
+        const badge = itemEl.querySelector('.sig-badge');
+        const detailEl = itemEl.querySelector('.signal-evidence');
         if (sig.detected) {
-          if (dot) dot.className = 'sig-dot bg-emerald';
-          if (tag) {
-            tag.className = 'sig-tag-status sig-passed';
-            tag.textContent = 'MATCH';
-          }
-          if (detailEl) detailEl.textContent = sig.detail;
+          badge.className = 'sig-badge sig-passed';
+          badge.innerHTML = '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>';
+          detailEl.textContent = sig.detail;
+          detailEl.style.color = 'var(--color-success)';
         } else {
-          if (dot) dot.className = item.key === 'generator' ? 'sig-dot bg-amber' : 'sig-dot bg-rose';
-          if (tag) {
-            tag.className = item.key === 'generator' ? 'sig-tag-status sig-muted' : 'sig-tag-status sig-failed';
-            tag.textContent = item.key === 'generator' ? 'REMOVED' : 'BLOCKED';
-          }
-          if (detailEl) detailEl.textContent = item.key === 'generator' ? 'Generator meta tag stripped from HTML' : 'Signature not present on page';
+          badge.className = 'sig-badge sig-failed';
+          badge.innerHTML = '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"></line></svg>';
+          detailEl.textContent = 'Not present on this page';
+          detailEl.style.color = 'var(--text-muted)';
         }
       }
     });
@@ -1694,113 +1867,177 @@ document.addEventListener('DOMContentLoaded', async () => {
     return /[0-9]/.test(v);
   }
 
+  // Helper to determine plugin confidence tier:
+  // Tier 1: Confirmed / High Confidence (version confirmed or active frontend asset)
+  // Tier 2: Medium Confidence (REST API endpoint/route, HTTP header, localized SDK)
+  // Tier 3: Additional Signatures (DOM pattern, comment, block heuristic)
+  function getPluginTier(p) {
+    if (!p) return 3;
+    if (p.confidence === 'confirmed' || p.confidence === 'high') return 1;
+    if (hasConfirmedVersion(p) || p.sourceTag === 'URL') return 1;
+    if (p.sourceTag === 'API' || p.sourceTag === 'HEADER' || p.confidence === 'medium') return 2;
+    if (p.version === 'REST API') return 2;
+    const m = (p.method || '').toLowerCase();
+    if (m.includes('rest') || m.includes('api') || m.includes('header') || m.includes('integration') || m.includes('sdk')) return 2;
+    return 3;
+  }
+
+  function getPluginConfidenceMeta(p) {
+    const tier = getPluginTier(p);
+    const hasVer = hasConfirmedVersion(p);
+    if (tier === 1) {
+      return {
+        tier: 1,
+        label: hasVer ? 'Confirmed' : 'High',
+        badgeClass: hasVer ? 'badge-confirmed' : 'badge-high'
+      };
+    }
+    if (tier === 2) {
+      return {
+        tier: 2,
+        label: 'Medium',
+        badgeClass: 'badge-medium'
+      };
+    }
+    return {
+      tier: 3,
+      label: 'Detected',
+      badgeClass: 'badge-low'
+    };
+  }
+
   // --- Plugin Inventory Rendering & Search ---
   function renderFilteredPlugins() {
     if (!reportData) return;
-    const containers = [els.pluginsList, document.getElementById('plugins-tab-list')].filter(Boolean);
-    containers.forEach(c => c.innerHTML = '');
+    const container = els.pluginsList;
+    container.innerHTML = '';
 
     const term = (els.pluginSearch.value || '').toLowerCase().trim();
 
-    let filtered = reportData.plugins.filter(p => {
+    const filtered = reportData.plugins.filter(p => {
       if (!term) return true;
       return p.slug.toLowerCase().includes(term) ||
              p.name.toLowerCase().includes(term) ||
              p.category.toLowerCase().includes(term);
     });
 
-    if (activeFilter === 'confirmed') {
-      filtered = filtered.filter(hasConfirmedVersion);
-    } else if (activeFilter === 'url') {
-      filtered = filtered.filter(p => p.sourceTag === 'URL');
-    } else if (activeFilter === 'dom') {
-      filtered = filtered.filter(p => p.sourceTag === 'DOM');
-    }
-
     if (filtered.length === 0) {
-      containers.forEach(container => {
-        container.innerHTML = `
-          <div class="state-container" style="min-height:120px;padding:24px 10px;">
-            <p style="font-size:11px;color:var(--text-muted);">No matching plugins found.</p>
-          </div>
-        `;
-      });
+      container.innerHTML = `
+        <div class="state-container" style="min-height:180px;">
+          <p style="font-size:12px;color:var(--text-muted);">No matching plugins found.</p>
+        </div>
+      `;
       return;
     }
 
-    // Sort confirmed plugins with version numbers first
+    // Sort: Tier 1 (Confirmed/High) -> Tier 2 (Medium) -> Tier 3 (Rest),
+    // then version confirmed first, then alphabetical by name
     filtered.sort((a, b) => {
-      const aConf = hasConfirmedVersion(a) ? 1 : 0;
-      const bConf = hasConfirmedVersion(b) ? 1 : 0;
-      if (aConf !== bConf) {
-        return bConf - aConf; // Confirmed plugins with version numbers appear FIRST
+      const tierA = getPluginTier(a);
+      const tierB = getPluginTier(b);
+      if (tierA !== tierB) {
+        return tierA - tierB;
+      }
+      const aVer = hasConfirmedVersion(a) ? 1 : 0;
+      const bVer = hasConfirmedVersion(b) ? 1 : 0;
+      if (aVer !== bVer) {
+        return bVer - aVer;
       }
       return (a.name || a.slug).localeCompare(b.name || b.slug);
     });
 
-    containers.forEach(container => {
-      filtered.forEach(p => {
-        const row = document.createElement('div');
-        row.className = 'plugin-item';
+    let lastTier = null;
+    const tierLabels = {
+      1: 'Confirmed & High Confidence',
+      2: 'Medium Confidence',
+      3: 'Additional Signatures'
+    };
 
-        const tagClass = p.sourceTag === 'URL' ? 'tag-url' : p.sourceTag === 'API' ? 'tag-api' : p.sourceTag === 'HEADER' ? 'tag-header' : 'tag-dom';
-        const isConfirmed = hasConfirmedVersion(p);
-        const versionDisplay = isConfirmed ? `v${p.version}` : (p.version === 'REST API' ? 'REST API' : 'Version hidden');
-        const versionClass = isConfirmed ? 'ver-confirmed' : 'ver-muted';
-
-        row.innerHTML = `
-          <div class="plugin-row-main">
-            <div class="plugin-thumb-wrap">
-              <div class="plugin-thumb-fallback">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M20.5 11H19V7a2 2 0 0 0-2-2h-4V3.5a2.5 2.5 0 0 0-5 0V5H4a2 2 0 0 0-2 2v4h1.5a2.5 2.5 0 0 1 0 5H2v4a2 2 0 0 0 2 2h4v-1.5a2.5 2.5 0 0 1 5 0V21h4a2 2 0 0 0 2-2v-4h1.5a2.5 2.5 0 0 0 0-5z"></path>
-                </svg>
-              </div>
-              <img class="plugin-thumb-img hidden" alt="${p.slug}" src="">
-            </div>
-            <div class="plugin-info-block">
-              <div class="plugin-title-line">
-                <a href="https://wordpress.org/plugins/${p.slug}/" class="plugin-title-link" target="_blank" rel="noopener noreferrer">${p.name}</a>
-              </div>
-              <div class="plugin-sub-line">
-                <span class="${versionClass}">${versionDisplay}</span>
-                ${isConfirmed ? '<span class="confirmed-check" title="Confirmed version number">&#10003;</span>' : ''}
-                <span>&bull;</span>
-                <span class="category-tag">${p.category}</span>
-              </div>
-            </div>
-            <div class="plugin-actions-right">
-              <span class="badge-tag ${tagClass}">${p.sourceTag}</span>
-              <svg class="chevron-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"></polyline></svg>
-            </div>
-          </div>
-          <div class="plugin-accordion hidden">
-            <div class="evidence-box">${p.evidence}</div>
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-top:4px;">
-              <span>Detected via: <strong>${p.method}</strong></span>
-              <a href="https://wordpress.org/plugins/${p.slug}/" target="_blank" rel="noopener noreferrer" style="color:#3b82f6;font-weight:600;text-decoration:none;">View on WP.org &rarr;</a>
-            </div>
-          </div>
+    filtered.forEach(p => {
+      const pTier = getPluginTier(p);
+      if (!term && pTier !== lastTier) {
+        lastTier = pTier;
+        const tierCount = filtered.filter(item => getPluginTier(item) === pTier).length;
+        const divider = document.createElement('div');
+        divider.className = 'plugin-tier-divider';
+        divider.innerHTML = `
+          <span class="tier-title">${tierLabels[pTier] || 'Other'}</span>
+          <span class="tier-badge tier-${pTier}">${tierCount}</span>
         `;
+        container.appendChild(divider);
+      }
 
-        // Multi-tier cascading icon resolution
-        const thumbWrap = row.querySelector('.plugin-thumb-wrap');
-        loadPluginIcon(thumbWrap, p.slug, p.name, row);
+      const row = document.createElement('div');
+      row.className = 'plugin-item';
 
-        // Expand/Collapse Accordion
-        const mainRow = row.querySelector('.plugin-row-main');
-        const acc = row.querySelector('.plugin-accordion');
-        const chev = row.querySelector('.chevron-icon');
-        mainRow.addEventListener('click', (e) => {
-          if (e.target.tagName.toLowerCase() === 'a') return;
-          const isHidden = acc.classList.toggle('hidden');
-          if (chev) {
-            chev.style.transform = isHidden ? 'rotate(0deg)' : 'rotate(180deg)';
-          }
-        });
+      const tagClass = p.sourceTag === 'URL' ? 'tag-url' : p.sourceTag === 'API' ? 'tag-api' : p.sourceTag === 'HEADER' ? 'tag-header' : 'tag-dom';
+      const isConfirmed = hasConfirmedVersion(p);
+      const versionDisplay = isConfirmed ? `v${p.version}` : (p.version === 'REST API' ? 'REST API' : 'Version hidden');
+      const versionClass = isConfirmed ? 'ver-confirmed' : 'ver-muted';
+      const confMeta = getPluginConfidenceMeta(p);
 
-        container.appendChild(row);
+      row.innerHTML = `
+        <div class="plugin-row-main" role="button" tabindex="0" aria-expanded="false">
+          <div class="plugin-thumb-wrap">
+            <div class="plugin-thumb-fallback">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M20.5 11H19V7a2 2 0 0 0-2-2h-4V3.5a2.5 2.5 0 0 0-5 0V5H4a2 2 0 0 0-2 2v4h1.5a2.5 2.5 0 0 1 0 5H2v4a2 2 0 0 0 2 2h4v-1.5a2.5 2.5 0 0 1 5 0V21h4a2 2 0 0 0 2-2v-4h1.5a2.5 2.5 0 0 0 0-5z"></path>
+              </svg>
+            </div>
+            <img class="plugin-thumb-img hidden" alt="${p.slug}" src="">
+          </div>
+          <div class="plugin-info-block">
+            <div class="plugin-title-line">
+              <a href="https://wordpress.org/plugins/${p.slug}/" class="plugin-title-link" target="_blank" rel="noopener noreferrer">${p.name}</a>
+              <span class="badge-tag ${tagClass}">${p.sourceTag}</span>
+            </div>
+            <div class="plugin-sub-line">
+              <span class="${versionClass}">${versionDisplay}</span>
+              ${isConfirmed ? '<span class="confirmed-check" title="Confirmed version number"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg></span>' : ''}
+              <span>&bull;</span>
+              <span class="category-tag">${p.category}</span>
+              <span>&bull;</span>
+              <span class="badge-confidence ${confMeta.badgeClass}">${confMeta.label}</span>
+            </div>
+          </div>
+          <svg class="chevron-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"></polyline></svg>
+        </div>
+        <div class="plugin-accordion-wrap">
+          <div class="plugin-accordion-inner">
+            <div class="evidence-box">${p.evidence}</div>
+            <div class="evidence-footer">
+              <span>Detected via: <strong>${p.method}</strong></span>
+              <a href="https://wordpress.org/plugins/${p.slug}/" class="plugin-ext-link" target="_blank" rel="noopener noreferrer">View on WP.org &rarr;</a>
+            </div>
+          </div>
+        </div>
+      `;
+
+      // Multi-tier cascading icon resolution
+      const thumbWrap = row.querySelector('.plugin-thumb-wrap');
+      loadPluginIcon(thumbWrap, p.slug, p.name, row);
+
+      // Expand/Collapse Accordion with fluid animation
+      const mainRow = row.querySelector('.plugin-row-main');
+      const toggleAccordion = () => {
+        const isExp = row.classList.toggle('expanded');
+        mainRow.setAttribute('aria-expanded', String(isExp));
+      };
+
+      mainRow.addEventListener('click', (e) => {
+        if (e.target.tagName.toLowerCase() === 'a') return;
+        toggleAccordion();
       });
+
+      mainRow.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          if (e.target.tagName.toLowerCase() === 'a') return;
+          e.preventDefault();
+          toggleAccordion();
+        }
+      });
+
+      container.appendChild(row);
     });
   }
 
@@ -1832,7 +2069,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const d = reportData;
     return `# WPScout - Diagnostic Stack Report
 Tagline: Scout Any WordPress Website.
-Version: v1.4
+Version: v1.5.0
 Target URL: ${d.url}
 Title: ${d.pageTitle}
 Confidence: ${d.confidence} (${d.signalScore}/7 signals confirmed)
@@ -1841,9 +2078,11 @@ Confidence: ${d.confidence} (${d.signalScore}/7 signals confirmed)
 Core Version: ${d.version}
 Active Theme: ${d.theme} (${d.themeVersion ? 'v' + d.themeVersion : 'Version unknown'})
 Page Builder: ${d.pageBuilder}
+Ecommerce: ${d.ecommerce && d.ecommerce !== 'None' ? d.ecommerce : 'None Detected'}
 Logged In: ${d.isUserLoggedIn ? 'Yes' : 'No'}
 
 ## SERVER & HOSTING
+Hosting Platform: ${d.hostingPlatform && d.hostingPlatform !== 'Unknown' ? d.hostingPlatform : 'Standard Host'}
 Web Server: ${d.serverSoftware}
 Platform/Proxy: ${d.proxyCDN}
 Host IP: ${d.ip}
@@ -1863,29 +2102,33 @@ Nameservers: ${d.dns}
 7. Admin/login paths: ${d.signals.adminPaths.detected ? 'CONFIRMED' : 'NO'}
 
 ## DETECTED PLUGINS (${d.plugins.length})
-${d.plugins.map(p => `- ${p.name} (${p.slug}) [${p.version || 'Version unknown'}] (${p.category})`).join('\n')}
+${(() => {
+  const tier1 = d.plugins.filter(p => getPluginTier(p) === 1);
+  const tier2 = d.plugins.filter(p => getPluginTier(p) === 2);
+  const tier3 = d.plugins.filter(p => getPluginTier(p) === 3);
+  let out = '';
+  if (tier1.length > 0) {
+    out += `\n### Confirmed & High Confidence (${tier1.length})\n` +
+      tier1.map(p => `- ${p.name} (${p.slug}) [${p.version && p.version !== 'Unknown' ? 'v' + p.version : 'Version hidden'}] (${p.category}) - ${p.method}`).join('\n') + '\n';
+  }
+  if (tier2.length > 0) {
+    out += `\n### Medium Confidence (${tier2.length})\n` +
+      tier2.map(p => `- ${p.name} (${p.slug}) [${p.version || 'REST API'}] (${p.category}) - ${p.method}`).join('\n') + '\n';
+  }
+  if (tier3.length > 0) {
+    out += `\n### Additional Signatures (${tier3.length})\n` +
+      tier3.map(p => `- ${p.name} (${p.slug}) [${p.version || 'Version unknown'}] (${p.category}) - ${p.method}`).join('\n') + '\n';
+  }
+  return out.trim();
+})()}
 `;
   }
 
   els.copyBtn.addEventListener('click', () => {
     if (!reportData) return;
-    const summary = {
-      target: reportData.pageTitle,
-      domain: reportData.url,
-      cms: "WordPress",
-      confidence: reportData.confidence,
-      server: reportData.proxyCDN !== 'None Detected' ? reportData.proxyCDN : reportData.isp,
-      ip: reportData.ip,
-      activeTheme: `${reportData.themeName || reportData.theme} ${reportData.themeVersion ? 'v' + reportData.themeVersion : ''}`.trim(),
-      plugins: reportData.plugins.map(p => `${p.name}${p.version ? ' (v' + p.version + ')' : ''}`)
-    };
-    navigator.clipboard.writeText(JSON.stringify(summary, null, 2)).then(() => {
-      showToast('Scout report copied as JSON');
-    }).catch(() => {
-      navigator.clipboard.writeText(generateReportText()).then(() => {
-        showToast('Diagnostic report copied to clipboard!');
-      });
-    });
+    navigator.clipboard.writeText(generateReportText()).then(() => {
+      showToast('Diagnostic report copied to clipboard!');
+    }).catch(() => showToast('Failed to copy'));
   });
 
   document.getElementById('btn-copy-theme')?.addEventListener('click', () => {
@@ -1924,14 +2167,10 @@ ${d.plugins.map(p => `- ${p.name} (${p.slug}) [${p.version || 'Version unknown'}
   }
 
   // --- Run Diagnostics Workflow ---
-  async function runDiagnostics(isManual = false) {
+  async function runDiagnostics() {
     reportData = null;
     els.loading.classList.remove('hidden');
     els.empty.classList.add('hidden');
-    if (isManual) {
-      els.refreshBtn.classList.add('animate-spin');
-      showToast("Re-scanning WordPress fingerprints...");
-    }
     els.refreshBtn.classList.add('spinning');
 
     // Hide all tab content panes and tab bar while diagnosing
@@ -1969,13 +2208,13 @@ ${d.plugins.map(p => `- ${p.name} (${p.slug}) [${p.version || 'Version unknown'}
         if (window.location.search.includes('internal') || window.location.hash === '#internal') {
           els.siteTitle.textContent = 'Internal Browser Page';
           els.siteUrl.textContent = 'chrome://extensions';
-          showEmptyState('Internal Browser Page', 'Chrome extensions cannot inspect browser-internal pages.', 'Protected', true);
+          showEmptyState('Internal Browser Page', 'Chrome extensions cannot inspect browser-internal pages.', 'Protected', true, { url: 'chrome://extensions' });
           return;
         }
         if (window.location.search.includes('nonwp') || window.location.search.includes('empty') || window.location.hash === '#empty') {
           els.siteTitle.textContent = 'Non-WordPress Site';
           els.siteUrl.textContent = 'https://example.com';
-          showEmptyState('Non-WordPress Site', 'No WordPress core files, REST API endpoints, or theme stylesheets were detected on this page.', 'No Signatures', false);
+          showEmptyState('Non-WordPress Site', 'No WordPress core files, REST API endpoints, or theme stylesheets were detected on this page.', 'No Signatures', false, { url: 'https://example.com' });
           return;
         }
         const sample = getSampleMockData();
@@ -1994,7 +2233,7 @@ ${d.plugins.map(p => `- ${p.name} (${p.slug}) [${p.version || 'Version unknown'}
           els.siteUrl.textContent = tab.url;
           els.siteUrl.removeAttribute('href');
         }
-        showEmptyState('Internal Browser Page', 'Chrome extensions cannot inspect browser-internal pages.', 'Protected', true);
+        showEmptyState('Internal Browser Page', 'Chrome extensions cannot inspect browser-internal pages.', 'Protected', true, tab);
         return;
       }
 
@@ -2021,7 +2260,7 @@ ${d.plugins.map(p => `- ${p.name} (${p.slug}) [${p.version || 'Version unknown'}
         }
         els.siteUrl.textContent = tab.url;
         els.siteUrl.href = tab.url;
-        showEmptyState('Non-WordPress Site', 'No WordPress core files, REST API endpoints, or theme stylesheets were detected on this page.', 'No Signatures', false);
+        showEmptyState('Non-WordPress Site', 'No WordPress core files, REST API endpoints, or theme stylesheets were detected on this page.', 'No Signatures', false, tab);
         return;
       }
 
@@ -2052,12 +2291,39 @@ ${d.plugins.map(p => `- ${p.name} (${p.slug}) [${p.version || 'Version unknown'}
       showEmptyState('Diagnostics Incomplete', e.message || 'Unable to scan page.', 'Error', false);
     } finally {
       els.refreshBtn.classList.remove('spinning');
-      els.refreshBtn.classList.remove('animate-spin');
     }
   }
 
-  els.refreshBtn.addEventListener('click', () => runDiagnostics(true));
-  els.emptyRescanBtn.addEventListener('click', () => runDiagnostics(true));
+  els.refreshBtn.addEventListener('click', runDiagnostics);
+  if (els.emptyRescanBtn) {
+    els.emptyRescanBtn.addEventListener('click', runDiagnostics);
+  }
+
+  // Open Sample WordPress Site Handlers (for Internal Page State)
+  const btnOpenSample = document.getElementById('btn-open-sample');
+  if (btnOpenSample) {
+    btnOpenSample.addEventListener('click', () => {
+      const url = 'https://wordpress.org';
+      if (window.chrome && chrome.tabs && chrome.tabs.create) {
+        chrome.tabs.create({ url });
+      } else {
+        window.open(url, '_blank');
+      }
+    });
+  }
+
+  document.querySelectorAll('.sample-site-pill').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const url = btn.getAttribute('data-url');
+      if (url) {
+        if (window.chrome && chrome.tabs && chrome.tabs.create) {
+          chrome.tabs.create({ url });
+        } else {
+          window.open(url, '_blank');
+        }
+      }
+    });
+  });
 
   // Initial Run
   runDiagnostics();
