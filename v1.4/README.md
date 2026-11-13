@@ -8,11 +8,11 @@
 
 ## 🚀 What's New in v1.4
 
-### 1. Dynamic Dimming Icon (WPSNIFFER Style)
-- **Automatic Tab Awareness**: When browsing the web, the extension icon in Chrome's toolbar dynamically responds to the active tab:
-  - **WordPress Website**: The toolbar icon lights up in **vibrant blue radar** with active status.
-  - **Non-WordPress Website / Browser Pages**: The toolbar icon automatically **dims to a subtle slate gray**, instantly letting you know if a site is running WordPress without needing to open the popup.
-- **Background Service Worker & Content Script**: A lightweight, non-blocking content script (`content.js`) and Manifest V3 background service worker (`background.js`) handle real-time tab status and icon switching with 0ms lag.
+### 1. Dynamic Toolbar Icon & Real-Time Plugin Count Badge
+- **Real-Time Plugin Count Badge**: When browsing any WordPress site, the toolbar icon automatically displays a crisp badge with the exact number of detected plugins (e.g. **`19`**, **`23`**, **`7`**) in vibrant WPScout blue (`#0284C7`) with bold white text. On non-WordPress or internal pages, the badge is automatically cleared.
+- **Background Pre-Fetching & 0ms Instant Results**: As soon as a WordPress webpage finishes loading, the content script and background service worker inspect the page passively and pre-resolve theme, plugin signatures, hosting platform, and DNS/IP into high-speed session storage (`chrome.storage.session`). When you click the extension icon, the full dashboard renders **instantaneously with zero loading delay**.
+- **Dynamic Icon Awareness**: The toolbar icon lights up in **vibrant blue radar** for WordPress sites and automatically **dims to subtle slate gray** for Non-WordPress sites.
+- **Background Service Worker & Content Script**: Non-blocking `content.js` and Manifest V3 `background.js` handle tab awareness, real-time badge updates, and session caching.
 
 ### 2. 100% Reliable Plugin & Theme Icon Detection
 - **Multi-Tier Icon Resolver**: Solves missing icons for both directory plugins and premium/custom plugins (matching and exceeding WPSniffer).

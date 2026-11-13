@@ -2191,113 +2191,189 @@ ${(() => {
 
     let currentTabUrl = '';
 
-    function notifyTabStatus(tabId, isWP) {
+    function notifyTabStatus(tabId, isWP, count = 0, data = null) {
       if (!window.chrome || !tabId) return;
       if (chrome.runtime && chrome.runtime.sendMessage) {
         try {
-          chrome.runtime.sendMessage({ type: 'WP_STATUS', isWP, tabId }, () => {
+          chrome.runtime.sendMessage({ type: 'WP_STATUS', isWP, tabId, count, data }, () => {
             if (chrome.runtime.lastError) {}
           });
         } catch (e) {}
       }
     }
 
-    try {
-      if (!window.chrome || !chrome.tabs || !chrome.tabs.query) {
-        // Fallback for standalone preview / browser testing
-        if (window.location.search.includes('internal') || window.location.hash === '#internal') {
-          els.siteTitle.textContent = 'Internal Browser Page';
-          els.siteUrl.textContent = 'chrome://extensions';
-          showEmptyState('Internal Browser Page', 'Chrome extensions cannot inspect browser-internal pages.', 'Protected', true, { url: 'chrome://extensions' });
+    async function runDiagnostics(forceRescan = false) {
+      try {
+        els.refreshBtn.classList.add('spinning');
+
+        if (!window.chrome || !chrome.tabs || !chrome.tabs.query) {
+          // Fallback for standalone preview / browser testing
+          if (window.location.search.includes('internal') || window.location.hash === '#internal') {
+            els.siteTitle.textContent = 'Internal Browser Page';
+            els.siteUrl.textContent = 'chrome://extensions';
+            showEmptyState('Internal Browser Page', 'Chrome extensions cannot inspect browser-internal pages.', 'Protected', true, { url: 'chrome://extensions' });
+            return;
+          }
+          if (window.location.search.includes('nonwp') || window.location.search.includes('empty') || window.location.hash === '#empty') {
+            els.siteTitle.textContent = 'Non-WordPress Site';
+            els.siteUrl.textContent = 'https://example.com';
+            showEmptyState('Non-WordPress Site', 'No WordPress core files, REST API endpoints, or theme stylesheets were detected on this page.', 'No Signatures', false, { url: 'https://example.com' });
+            return;
+          }
+          const sample = getSampleMockData();
+          reportData = sample;
+          renderDashboard(sample);
           return;
         }
-        if (window.location.search.includes('nonwp') || window.location.search.includes('empty') || window.location.hash === '#empty') {
-          els.siteTitle.textContent = 'Non-WordPress Site';
-          els.siteUrl.textContent = 'https://example.com';
-          showEmptyState('Non-WordPress Site', 'No WordPress core files, REST API endpoints, or theme stylesheets were detected on this page.', 'No Signatures', false, { url: 'https://example.com' });
+
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (!tab || !tab.url || tab.url.startsWith('chrome://') || tab.url.startsWith('edge://') || tab.url.startsWith('about:') || tab.url.startsWith('chrome-extension://')) {
+          if (tab && tab.id) {
+            notifyTabStatus(tab.id, false, 0);
+          }
+          if (tab && tab.url) {
+            els.siteTitle.textContent = tab.title || 'Internal Browser Page';
+            els.siteUrl.textContent = tab.url;
+            els.siteUrl.removeAttribute('href');
+          }
+          showEmptyState('Internal Browser Page', 'Chrome extensions cannot inspect browser-internal pages.', 'Protected', true, tab);
           return;
         }
-        const sample = getSampleMockData();
-        reportData = sample;
-        renderDashboard(sample);
-        return;
-      }
 
-      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-      if (!tab || !tab.url || tab.url.startsWith('chrome://') || tab.url.startsWith('edge://') || tab.url.startsWith('about:') || tab.url.startsWith('chrome-extension://')) {
-        if (tab && tab.id) {
-          notifyTabStatus(tab.id, false);
-        }
-        if (tab && tab.url) {
-          els.siteTitle.textContent = tab.title || 'Internal Browser Page';
-          els.siteUrl.textContent = tab.url;
-          els.siteUrl.removeAttribute('href');
-        }
-        showEmptyState('Internal Browser Page', 'Chrome extensions cannot inspect browser-internal pages.', 'Protected', true, tab);
-        return;
-      }
-
-      currentTabUrl = tab.url;
-      els.siteUrl.textContent = tab.url;
-      els.siteUrl.href = tab.url;
-
-      const res = await chrome.scripting.executeScript({
-        target: { tabId: tab.id },
-        func: detectWordPress
-      });
-
-      const data = res && res[0] ? res[0].result : null;
-
-      if (!data || !data.isWP) {
-        if (tab && tab.id) {
-          notifyTabStatus(tab.id, false);
-        }
-        try {
-          const u = new URL(tab.url);
-          els.siteTitle.textContent = tab.title || u.hostname || 'Non-WordPress Site';
-        } catch (err) {
-          els.siteTitle.textContent = tab.title || 'Non-WordPress Site';
-        }
+        currentTabUrl = tab.url;
         els.siteUrl.textContent = tab.url;
         els.siteUrl.href = tab.url;
-        showEmptyState('Non-WordPress Site', 'No WordPress core files, REST API endpoints, or theme stylesheets were detected on this page.', 'No Signatures', false, tab);
-        return;
+
+        // 1. INSTANT CACHE CHECK (0ms perceived latency!)
+        if (!forceRescan) {
+          let cached = null;
+          if (chrome.storage && chrome.storage.session) {
+            const res = await chrome.storage.session.get(`report_${tab.id}`).catch(() => null);
+            if (res && res[`report_${tab.id}`]) {
+              cached = res[`report_${tab.id}`];
+            }
+          }
+          if (cached) {
+            if (!cached.isWP) {
+              try {
+                const u = new URL(tab.url);
+                els.siteTitle.textContent = tab.title || u.hostname || 'Non-WordPress Site';
+              } catch (err) {
+                els.siteTitle.textContent = tab.title || 'Non-WordPress Site';
+              }
+              els.siteUrl.textContent = tab.url;
+              els.siteUrl.href = tab.url;
+              showEmptyState('Non-WordPress Site', 'No WordPress core files, REST API endpoints, or theme stylesheets were detected on this page.', 'No Signatures', false, tab);
+              return;
+            }
+
+            reportData = cached;
+            renderDashboard(cached);
+
+            // If IP/DNS was still pending in background when cached, quietly enrich in background
+            if (!cached.ip || cached.ip === 'Unknown') {
+              (async () => {
+                try {
+                  const u = new URL(tab.url);
+                  const [ip, ns] = await Promise.all([
+                    getHostIP(u.hostname),
+                    getNameservers(u.hostname)
+                  ]);
+                  cached.ip = ip;
+                  cached.dns = ns;
+                  const geo = await getISPAndLocation(ip);
+                  cached.isp = geo.isp;
+                  cached.location = geo.location;
+                  reportData = cached;
+                  renderDashboard(cached);
+                  notifyTabStatus(tab.id, true, (cached.plugins && cached.plugins.length) || 0, cached);
+                } catch(e) {}
+              })();
+            }
+            return;
+          }
+        }
+
+        // 2. Active Scan or Force Rescan (display loader)
+        els.loading.classList.remove('hidden');
+        els.empty.classList.add('hidden');
+
+        let data = null;
+        try {
+          const res = await chrome.tabs.sendMessage(tab.id, { type: 'WP_RESCAN' });
+          if (res && res.ok && res.data) {
+            data = res.data;
+          }
+        } catch (err) {
+          try {
+            await chrome.scripting.executeScript({
+              target: { tabId: tab.id },
+              files: ['content.js']
+            });
+            const retryRes = await chrome.tabs.sendMessage(tab.id, { type: 'WP_RESCAN' });
+            if (retryRes && retryRes.ok && retryRes.data) {
+              data = retryRes.data;
+            }
+          } catch (execErr) {
+            const res = await chrome.scripting.executeScript({
+              target: { tabId: tab.id },
+              func: detectWordPress
+            });
+            data = res && res[0] ? res[0].result : null;
+          }
+        }
+
+        if (!data || !data.isWP) {
+          if (tab && tab.id) {
+            notifyTabStatus(tab.id, false, 0);
+          }
+          try {
+            const u = new URL(tab.url);
+            els.siteTitle.textContent = tab.title || u.hostname || 'Non-WordPress Site';
+          } catch (err) {
+            els.siteTitle.textContent = tab.title || 'Non-WordPress Site';
+          }
+          els.siteUrl.textContent = tab.url;
+          els.siteUrl.href = tab.url;
+          showEmptyState('Non-WordPress Site', 'No WordPress core files, REST API endpoints, or theme stylesheets were detected on this page.', 'No Signatures', false, tab);
+          return;
+        }
+
+        const urlObj = new URL(tab.url);
+        data.hostname = urlObj.hostname;
+
+        // Parallel Network Lookups (DNS IP, Nameservers, ISP / Geolocation)
+        const [ip, ns] = await Promise.all([
+          getHostIP(data.hostname),
+          getNameservers(data.hostname)
+        ]);
+
+        data.ip = ip;
+        data.dns = ns;
+
+        const geo = await getISPAndLocation(ip);
+        data.isp = geo.isp;
+        data.location = geo.location;
+
+        reportData = data;
+        renderDashboard(data);
+
+        if (tab && tab.id) {
+          notifyTabStatus(tab.id, true, (data.plugins && data.plugins.length) || 0, data);
+        }
+
+      } catch (e) {
+        showEmptyState('Diagnostics Incomplete', e.message || 'Unable to scan page.', 'Error', false);
+      } finally {
+        els.refreshBtn.classList.remove('spinning');
       }
-
-      const urlObj = new URL(tab.url);
-      data.hostname = urlObj.hostname;
-
-      // Parallel Network Lookups (DNS IP, Nameservers, ISP / Geolocation)
-      const [ip, ns] = await Promise.all([
-        getHostIP(data.hostname),
-        getNameservers(data.hostname)
-      ]);
-
-      data.ip = ip;
-      data.dns = ns;
-
-      const geo = await getISPAndLocation(ip);
-      data.isp = geo.isp;
-      data.location = geo.location;
-
-      reportData = data;
-      renderDashboard(data);
-
-      if (tab && tab.id) {
-        notifyTabStatus(tab.id, true);
-      }
-
-    } catch (e) {
-      showEmptyState('Diagnostics Incomplete', e.message || 'Unable to scan page.', 'Error', false);
-    } finally {
-      els.refreshBtn.classList.remove('spinning');
     }
   }
 
-  els.refreshBtn.addEventListener('click', runDiagnostics);
-  if (els.emptyRescanBtn) {
-    els.emptyRescanBtn.addEventListener('click', runDiagnostics);
-  }
+    els.refreshBtn.addEventListener('click', () => runDiagnostics(true));
+    if (els.emptyRescanBtn) {
+      els.emptyRescanBtn.addEventListener('click', () => runDiagnostics(true));
+    }
 
   // Open Sample WordPress Site Handlers (for Internal Page State)
   const btnOpenSample = document.getElementById('btn-open-sample');
