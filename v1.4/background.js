@@ -62,13 +62,13 @@ function isInternalUrl(url) {
 function updateTabBadge(tabId, pluginCount, isWP) {
   if (!tabId || tabId <= 0) return;
 
-  const iconPath = isWP ? ICONS_ACTIVE : ICONS_DIMMED;
   const countStr = isWP ? (pluginCount > 0 ? String(pluginCount) : 'WP') : '';
   const title = isWP
     ? `WPScout - WordPress Detected (${pluginCount} ${pluginCount === 1 ? 'Plugin' : 'Plugins'})`
     : 'WPScout - Scout Any WordPress Website (Non-WordPress Site)';
 
-  chrome.action.setIcon({ tabId, path: iconPath }).catch(() => {});
+  // Always keep the crisp brand blue icon active
+  chrome.action.setIcon({ tabId, path: ICONS_ACTIVE }).catch(() => {});
   chrome.action.setTitle({ tabId, title }).catch(() => {});
   chrome.action.setBadgeText({ tabId, text: countStr }).catch(() => {});
 
@@ -97,10 +97,20 @@ function updateTabIcon(tabId, isWP) {
   updateTabBadge(tabId, count, isWP);
 }
 
+// Fast fetch with timeout helper
+function fetchWithTimeout(resource, options = {}, timeout = 3000) {
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), timeout);
+  return fetch(resource, {
+    ...options,
+    signal: controller.signal
+  }).finally(() => clearTimeout(id));
+}
+
 // Network Helpers for background enrichment
 async function getHostIP(hostname) {
   try {
-    const res = await fetch(`https://dns.google/resolve?name=${encodeURIComponent(hostname)}&type=A`);
+    const res = await fetchWithTimeout(`https://dns.google/resolve?name=${encodeURIComponent(hostname)}&type=A`, {}, 3000);
     const data = await res.json();
     if (data.Answer && data.Answer.length > 0) {
       return data.Answer.map(a => a.data).find(ip => ip.match(/^[0-9.]+$/)) || 'Unknown';
@@ -114,7 +124,7 @@ async function getNameservers(hostname) {
     const parts = hostname.split('.');
     let apex = hostname;
     if (parts.length > 2) apex = parts.slice(-2).join('.');
-    const res = await fetch(`https://dns.google/resolve?name=${encodeURIComponent(apex)}&type=NS`);
+    const res = await fetchWithTimeout(`https://dns.google/resolve?name=${encodeURIComponent(apex)}&type=NS`, {}, 3000);
     const data = await res.json();
     if (data.Answer && data.Answer.length > 0) {
       return data.Answer.map(a => a.data.replace(/\.$/, '')).slice(0, 2).join(', ');
@@ -128,7 +138,7 @@ async function getISPAndLocation(ip) {
     return { isp: 'Localhost / Private', location: 'Internal Network' };
   }
   try {
-    const res = await fetch(`https://ipwho.is/${ip}`);
+    const res = await fetchWithTimeout(`https://ipwho.is/${encodeURIComponent(ip)}`, {}, 3000);
     const data = await res.json();
     if (data && data.success) {
       const flag = data.flag && data.flag.emoji ? `${data.flag.emoji} ` : '';

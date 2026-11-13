@@ -65,6 +65,15 @@
 
   // 2. Full WordPress & Plugin Diagnostic Engine
   async function detectWordPress() {
+  function fetchWithTimeout(resource, options = {}, timeout = 2500) {
+    const controller = new AbortController();
+    const id = setTimeout(() => controller.abort(), timeout);
+    return fetch(resource, {
+      ...options,
+      signal: controller.signal
+    }).finally(() => clearTimeout(id));
+  }
+
   let isWP = false;
   let version = 'Unknown';
   let theme = 'Unknown';
@@ -484,7 +493,7 @@
   if (theme !== 'Unknown') {
     try {
       const styleUrl = `${origin}/wp-content/themes/${theme}/style.css`;
-      const styleRes = await fetch(styleUrl);
+      const styleRes = await fetchWithTimeout(styleUrl, {}, 2000);
       if (styleRes.ok) {
         const cssText = await styleRes.text();
         if (cssText) {
@@ -565,15 +574,13 @@
   ];
 
   try {
-    const abortCtrl = new AbortController();
     let response;
     try {
-      response = await fetch(document.location.href, {
-        method: 'GET',
-        signal: abortCtrl.signal
-      });
+      response = await fetchWithTimeout(document.location.href, {
+        method: 'GET'
+      }, 2000);
     } catch (e) {
-      response = await fetch(document.location.href, { method: 'HEAD' });
+      response = await fetchWithTimeout(document.location.href, { method: 'HEAD' }, 1500);
     }
 
     // --- Signal 2: wp-json in Link Header ---
@@ -739,8 +746,8 @@
   let restSiteName = '';
   let restDescription = '';
   try {
-    let restRes = await fetch(origin + '/wp-json');
-    if (!restRes.ok) restRes = await fetch(origin + '/?rest_route=/');
+    let restRes = await fetchWithTimeout(origin + '/wp-json', {}, 2500);
+    if (!restRes.ok) restRes = await fetchWithTimeout(origin + '/?rest_route=/', {}, 2000);
 
     if (restRes.ok) {
       const restData = await restRes.json();
