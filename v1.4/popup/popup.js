@@ -1179,7 +1179,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Update empty card content
     const emptyTitle = document.getElementById('empty-title');
     const emptyDesc = document.getElementById('empty-desc');
-    const emptyPill = document.getElementById('empty-pill');
     const emptyIconWrap = document.getElementById('empty-icon-wrap');
     const emptyIconNonwp = document.getElementById('empty-icon-nonwp');
     const emptyIconInternal = document.getElementById('empty-icon-internal');
@@ -1190,7 +1189,6 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     if (emptyTitle) emptyTitle.textContent = title;
     if (emptyDesc) emptyDesc.textContent = desc;
-    if (emptyPill) emptyPill.textContent = pillText;
 
     if (emptyIconWrap) {
       if (isInternal) {
