@@ -1,4 +1,4 @@
-# WPScout - Scout Any WordPress Website (v1.5.0)
+# WPScout - Scout Any WordPress Website (v1.5.1)
 
 > **Scout Any WordPress Website.**
 >

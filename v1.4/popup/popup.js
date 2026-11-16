@@ -2083,7 +2083,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const d = reportData;
     return `# WPScout - Diagnostic Stack Report
 Tagline: Scout Any WordPress Website.
-Version: v1.5.0
+Version: v1.5.1
 Target URL: ${d.url}
 Title: ${d.pageTitle}
 Confidence: ${d.confidence} (${d.signalScore}/7 signals confirmed)
