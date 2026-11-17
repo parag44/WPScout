@@ -1,0 +1,721 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WPScout — Scout Any WordPress Website in Seconds | Chrome Extension</title>
+  <meta name="description" content="Detect WordPress versions, active themes, hidden plugins via REST API, server technologies, real-time HTTP cache status, and DNS records with a single click.">
+  <meta name="keywords" content="WordPress detector, WP theme detector, WP plugin detector, WordPress stack inspector, Chrome extension, WordPress developer tools, WPScout">
+  
+  <!-- Open Graph / Social Meta -->
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://parag.xyz/WPScout/">
+  <meta property="og:title" content="WPScout — Scout Any WordPress Website in Seconds">
+  <meta property="og:description" content="The modern developer-first Chrome extension for deep WordPress stack inspection, plugin discovery, server diagnostics, and real-time caching analysis.">
+  <meta property="og:image" content="https://parag.xyz/WPScout/images/promo-marquee.jpg">
+
+  <!-- Twitter Meta -->
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="WPScout — Scout Any WordPress Website in Seconds">
+  <meta name="twitter:description" content="Instant WordPress core version, theme inheritance, REST API plugins discovery, HTTP cache headers, and DNS diagnostics.">
+  <meta name="twitter:image" content="https://parag.xyz/WPScout/images/promo-marquee.jpg">
+
+  <!-- Favicon -->
+  <link rel="icon" type="image/png" href="images/favicon.png">
+  <link rel="apple-touch-icon" href="images/icon-128.png">
+
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+
+  <link rel="stylesheet" href="style.css">
+
+  <!-- Early Theme Init to avoid FOUC -->
+  <script>
+    (function() {
+      try {
+        const saved = localStorage.getItem('wpscout-theme');
+        if (saved) {
+          document.documentElement.setAttribute('data-theme', saved);
+        } else if (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) {
+          document.documentElement.setAttribute('data-theme', 'light');
+        }
+      } catch (e) {}
+    })();
+  </script>
+</head>
+<body>
+  <!-- Background Glow & Grid -->
+  <div class="bg-mesh">
+    <div class="glow glow-1"></div>
+    <div class="glow glow-2"></div>
+    <div class="glow glow-3"></div>
+  </div>
+  <div class="grid-overlay"></div>
+
+  <!-- Announcement Bar -->
+  <aside class="announcement-bar">
+    <div class="container announcement-inner">
+      <span class="badge-pill">New v1.5</span>
+      <span class="announcement-text">WPScout is now live on the Chrome Web Store with Manifest V3 support!</span>
+      <a href="https://chromewebstore.google.com/detail/pnfcaepdbhbioeplilbgliegcnclpake?utm_source=parag.xyz" target="_blank" rel="noopener noreferrer" class="announcement-link">
+        Get it for Chrome &rarr;
+      </a>
+    </div>
+  </aside>
+
+  <!-- Navigation -->
+  <header class="site-header">
+    <div class="container header-inner">
+      <a href="#" class="brand-link">
+        <div class="brand-icon-box">
+          <img src="images/icon-128.png" alt="WPScout Logo" class="brand-logo" width="36" height="36">
+        </div>
+        <div class="brand-text">
+          <span class="brand-name">WPScout</span>
+          <span class="brand-version">v1.5.1</span>
+        </div>
+      </a>
+
+      <nav class="nav-links">
+        <a href="#features">Features</a>
+        <a href="#demo">Live Demo</a>
+        <a href="#screenshots">Screenshots</a>
+        <a href="#comparison">Why WPScout</a>
+        <a href="#privacy">Privacy</a>
+        <a href="#faq">FAQ</a>
+      </nav>
+
+      <div class="header-actions">
+        <!-- Theme Toggle Button -->
+        <button id="theme-toggle-btn" class="theme-toggle-btn" aria-label="Toggle light and dark mode" title="Toggle theme">
+          <!-- Sun Icon (visible in dark mode) -->
+          <svg class="theme-icon-sun" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="5"></circle>
+            <line x1="12" y1="1" x2="12" y2="3"></line>
+            <line x1="12" y1="21" x2="12" y2="23"></line>
+            <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+            <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+            <line x1="1" y1="12" x2="3" y2="12"></line>
+            <line x1="21" y1="12" x2="23" y2="12"></line>
+            <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+            <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+          </svg>
+          <!-- Moon Icon (visible in light mode) -->
+          <svg class="theme-icon-moon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+          </svg>
+        </button>
+
+        <a href="https://chromewebstore.google.com/detail/pnfcaepdbhbioeplilbgliegcnclpake?utm_source=parag.xyz" target="_blank" rel="noopener noreferrer" class="btn btn-primary btn-sm">
+          <svg class="btn-icon" viewBox="0 0 24 24" fill="currentColor" width="16" height="16">
+            <path d="M12 0C8.21 0 4.831 1.757 2.632 4.501l3.953 6.848A5.454 5.454 0 0 1 12 6.545h10.691A12 12 0 0 0 12 0zM1.931 5.47A11.943 11.943 0 0 0 0 12c0 6.012 4.42 10.991 10.189 11.864l3.953-6.847a5.45 5.45 0 0 1-6.892-2.482L1.931 5.47zm13.116 6.53a5.454 5.454 0 0 1-1.393 4.545L8.337 24A11.996 11.996 0 0 0 24 12c0-.528-.035-1.047-.1-1.556h-8.853c0 .524 0 1.056 0 1.556zM12 16a4 4 0 1 0 0-8 4 4 0 0 0 0 8z"/>
+          </svg>
+          <span>Add to Chrome</span>
+        </a>
+      </div>
+    </div>
+  </header>
+
+  <!-- Hero Section -->
+  <section class="hero-section">
+    <div class="container hero-inner">
+      <div class="hero-badge">
+        <span class="pulse-dot"></span>
+        <span>Developer-First WordPress Inspector</span>
+        <span class="badge-separator">•</span>
+        <span class="star-rating">★★★★★ 5.0 Rating</span>
+      </div>
+
+      <h1 class="hero-title">
+        Scout Any WordPress Website <br>
+        <span class="gradient-text">in a Single Click.</span>
+      </h1>
+
+      <p class="hero-subtitle">
+        Instant deep stack inspection, verified plugin discovery via REST API namespaces, theme inheritance, server & CDN architecture, real-time HTTP cache status, and DNS resolution. 100% client-side privacy.
+      </p>
+
+      <div class="hero-cta-group">
+        <a href="https://chromewebstore.google.com/detail/pnfcaepdbhbioeplilbgliegcnclpake?utm_source=parag.xyz" target="_blank" rel="noopener noreferrer" class="btn btn-primary btn-lg pulse-glow">
+          <svg class="btn-icon" viewBox="0 0 24 24" fill="currentColor" width="22" height="22">
+            <path d="M12 0C8.21 0 4.831 1.757 2.632 4.501l3.953 6.848A5.454 5.454 0 0 1 12 6.545h10.691A12 12 0 0 0 12 0zM1.931 5.47A11.943 11.943 0 0 0 0 12c0 6.012 4.42 10.991 10.189 11.864l3.953-6.847a5.45 5.45 0 0 1-6.892-2.482L1.931 5.47zm13.116 6.53a5.454 5.454 0 0 1-1.393 4.545L8.337 24A11.996 11.996 0 0 0 24 12c0-.528-.035-1.047-.1-1.556h-8.853c0 .524 0 1.056 0 1.556zM12 16a4 4 0 1 0 0-8 4 4 0 0 0 0 8z"/>
+          </svg>
+          <div class="btn-text-wrap">
+            <span class="btn-main-text">Add to Chrome — It's Free</span>
+            <span class="btn-sub-text">Chrome Web Store • Instant Install</span>
+          </div>
+        </a>
+
+        <a href="#demo" class="btn btn-secondary btn-lg">
+          <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20">
+            <polygon points="5 3 19 12 5 21 5 3"></polygon>
+          </svg>
+          <span>Explore Live Demo</span>
+        </a>
+      </div>
+
+      <!-- Quick Trust Badges -->
+      <div class="hero-trust-row">
+        <div class="trust-item">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
+          <span>100% Free Forever</span>
+        </div>
+        <div class="trust-item">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
+          <span>Manifest V3 Compliant</span>
+        </div>
+        <div class="trust-item">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
+          <span>Zero Telemetry / No Tracking</span>
+        </div>
+        <div class="trust-item">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
+          <span>No Account Required</span>
+        </div>
+      </div>
+
+      <!-- Hero Visual Showcase -->
+      <div class="hero-visual-frame">
+        <div class="browser-chrome-bar">
+          <div class="traffic-lights">
+            <span class="light red"></span>
+            <span class="light yellow"></span>
+            <span class="light green"></span>
+          </div>
+          <div class="mock-address-bar">
+            <svg class="lock-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>
+            <span class="mock-url">https://wordpress.org</span>
+            <span class="mock-badge">WordPress Detected</span>
+          </div>
+          <div class="browser-actions">
+            <span class="ext-icon-active" title="WPScout Active on WordPress Site">
+              <img src="images/icon-128.png" alt="WPScout" width="20" height="20">
+            </span>
+          </div>
+        </div>
+
+        <div class="hero-image-wrap">
+          <img src="images/screenshot-overview.jpg" alt="WPScout Extension Popup Interface" class="hero-image" loading="eager" width="1280" height="800">
+          
+          <!-- Floating Feature Badges -->
+          <div class="floating-badge badge-top-left glass-card">
+            <div class="fb-icon bg-blue">⚡</div>
+            <div class="fb-content">
+              <strong>Core 6.7 Verified</strong>
+              <span>Official API match</span>
+            </div>
+          </div>
+
+          <div class="floating-badge badge-top-right glass-card">
+            <div class="fb-icon bg-emerald">🎯</div>
+            <div class="fb-content">
+              <strong>Cache: HIT</strong>
+              <span>cf-cache-status: HIT</span>
+            </div>
+          </div>
+
+          <div class="floating-badge badge-bottom-left glass-card">
+            <div class="fb-icon bg-purple">🧩</div>
+            <div class="fb-content">
+              <strong>REST API Probe</strong>
+              <span>Hidden plugins revealed</span>
+            </div>
+          </div>
+
+          <div class="floating-badge badge-bottom-right glass-card">
+            <div class="fb-icon bg-amber">🛡️</div>
+            <div class="fb-content">
+              <strong>7-Signal Proof</strong>
+              <span>100% WordPress Verified</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Metrics / Proof Bar -->
+  <section class="stats-section">
+    <div class="container stats-grid">
+      <div class="stat-card">
+        <div class="stat-num">1 Click</div>
+        <div class="stat-label">Instant Full Stack Analysis</div>
+        <div class="stat-sub">Zero waiting, runs entirely in-browser</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-num">7 Signals</div>
+        <div class="stat-label">Multi-Vector Proof Engine</div>
+        <div class="stat-sub">REST, link tags, assets, scripts & logins</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-num">Deep REST</div>
+        <div class="stat-label">Background Plugin Discovery</div>
+        <div class="stat-sub">Finds plugins with no frontend assets</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-num">0 KB</div>
+        <div class="stat-label">User Data Collected</div>
+        <div class="stat-sub">100% client-side privacy architecture</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Features Grid -->
+  <section id="features" class="section">
+    <div class="container">
+      <div class="section-header text-center">
+        <div class="section-pill">Complete Capability Suite</div>
+        <h2 class="section-title">Built for Modern WordPress Engineers</h2>
+        <p class="section-subtitle">
+          Everything you need to inspect, audit, reverse-engineer, and debug any WordPress installation without logging in.
+        </p>
+      </div>
+
+      <div class="features-grid">
+        <!-- Feature 1 -->
+        <div class="feature-card glass-card">
+          <div class="feature-icon bg-blue-subtle">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#3b82f6" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+          </div>
+          <h3 class="feature-heading">WordPress Core & Gutenberg Detection</h3>
+          <p class="feature-desc">
+            Accurately identifies whether a site is built with WordPress, detects exact core version, compares against the latest release via the official WordPress API, and notes Gutenberg editor integration.
+          </p>
+          <ul class="feature-bullets">
+            <li>Exact core version number & release comparison</li>
+            <li>Gutenberg block engine status</li>
+            <li>Direct link to WordPress.org release notes</li>
+          </ul>
+        </div>
+
+        <!-- Feature 2 -->
+        <div class="feature-card glass-card featured-glow">
+          <div class="feature-icon bg-purple-subtle">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#a855f7" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>
+          </div>
+          <div class="badge-flag">Signature Feature</div>
+          <h3 class="feature-heading">Deep Plugin Discovery (REST + Assets)</h3>
+          <p class="feature-desc">
+            Unlike surface scanners that only read HTML asset URLs, WPScout probes WordPress REST API namespaces (<code>/wp-json</code> and <code>?rest_route=/</code>) to discover hidden background plugins.
+          </p>
+          <ul class="feature-bullets">
+            <li>Confirmed plugin versions sorted to the top</li>
+            <li>REST API namespace probing for backend plugins</li>
+            <li>Official high-res icons from WordPress.org</li>
+            <li>Instant live search filter through all discovered plugins</li>
+          </ul>
+        </div>
+
+        <!-- Feature 3 -->
+        <div class="feature-card glass-card">
+          <div class="feature-icon bg-emerald-subtle">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+          </div>
+          <h3 class="feature-heading">Real-Time HTTP Cache Inspection</h3>
+          <p class="feature-desc">
+            Inspects response headers to diagnose real-time page caching status. See instantly if you are viewing a freshly generated page or a cached edge delivery.
+          </p>
+          <ul class="feature-bullets">
+            <li>Live status indicators: <code>HIT</code>, <code>MISS</code>, <code>BYPASS</code>, <code>DYNAMIC</code></li>
+            <li>Detects Cloudflare, LiteSpeed Cache, WP Rocket, Varnish</li>
+            <li>Response timing & cache-control header inspection</li>
+          </ul>
+        </div>
+
+        <!-- Feature 4 -->
+        <div class="feature-card glass-card">
+          <div class="feature-icon bg-amber-subtle">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" stroke-width="2"><rect x="2" y="2" width="20" height="8" rx="2" ry="2"/><rect x="2" y="14" width="20" height="8" rx="2" ry="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>
+          </div>
+          <h3 class="feature-heading">Hosting, Server & Reverse Proxy</h3>
+          <p class="feature-desc">
+            Uncover the infrastructure layer powering the website. Identifies underlying web servers, proxies, and managed hosting platforms.
+          </p>
+          <ul class="feature-bullets">
+            <li>Nginx, Apache, LiteSpeed, OpenLiteSpeed, Caddy</li>
+            <li>Detects Kinsta, WP Engine, Cloudflare, Pantheon, Sucuri</li>
+            <li>PHP runtime version when exposed in HTTP headers</li>
+          </ul>
+        </div>
+
+        <!-- Feature 5 -->
+        <div class="feature-card glass-card">
+          <div class="feature-icon bg-sky-subtle">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#0ea5e9" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+          </div>
+          <h3 class="feature-heading">DNS & Datacenter Resolution (DoH)</h3>
+          <p class="feature-desc">
+            Resolves domain Host IP (A record) and Authoritative Nameservers (NS records) securely via Google DNS-over-HTTPS without exposing user queries.
+          </p>
+          <ul class="feature-bullets">
+            <li>Public Host IPv4 address lookup</li>
+            <li>Authoritative Nameservers for domain</li>
+            <li>Datacenter ISP identification and country flag</li>
+          </ul>
+        </div>
+
+        <!-- Feature 6 -->
+        <div class="feature-card glass-card">
+          <div class="feature-icon bg-rose-subtle">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#f43f5e" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+          </div>
+          <h3 class="feature-heading">7-Signal Verification & 1-Click Exports</h3>
+          <p class="feature-desc">
+            Zero guessing. WPScout checks 7 distinct signals before confirming WordPress presence, and lets developers export formatted reports in seconds.
+          </p>
+          <ul class="feature-bullets">
+            <li>Copy formatted Markdown stack report to clipboard</li>
+            <li>Export structured JSON for issue trackers & audits</li>
+            <li>Download clean TXT summary file</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Interactive Demo Simulator Section -->
+  <section id="demo" class="section demo-section">
+    <div class="container">
+      <div class="section-header text-center">
+        <div class="section-pill">Interactive Preview</div>
+        <h2 class="section-title">Experience WPScout Live in Your Browser</h2>
+        <p class="section-subtitle">
+          Click the sample targets below to see how WPScout analyzes and breaks down real-world WordPress architectures in real time.
+        </p>
+      </div>
+
+      <!-- Demo Container -->
+      <div class="demo-wrapper glass-card">
+        <!-- Demo Controls -->
+        <div class="demo-controls">
+          <span class="demo-label">Select a Website:</span>
+          <div class="demo-buttons">
+            <button class="demo-btn active" data-target="wordpress">wordpress.org</button>
+            <button class="demo-btn" data-target="techcrunch">techcrunch.com</button>
+            <button class="demo-btn" data-target="woocommerce">woocommerce.com</button>
+            <button class="demo-btn" data-target="nonwp">github.com (Non-WP)</button>
+          </div>
+        </div>
+
+        <!-- Simulated Inspector Window -->
+        <div class="simulator-window">
+          <div class="sim-header">
+            <div class="sim-brand">
+              <img src="images/icon-128.png" alt="WPScout" width="22" height="22">
+              <span class="sim-title">WPScout</span>
+              <span id="sim-status-pill" class="status-pill status-wp">WordPress Detected</span>
+            </div>
+            <div class="sim-url" id="sim-url-text">https://wordpress.org</div>
+            <div class="sim-actions">
+              <button class="sim-btn-copy" id="sim-copy-btn" title="Copy Markdown Report">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                <span>Copy Report</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- Simulator Body -->
+          <div class="sim-body" id="sim-body-content">
+            <!-- Dynamic Content Injected By JS -->
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Screenshot Gallery Section -->
+  <section id="screenshots" class="section">
+    <div class="container">
+      <div class="section-header text-center">
+        <div class="section-pill">In-Depth Interface</div>
+        <h2 class="section-title">Designed for Developer Clarity</h2>
+        <p class="section-subtitle">
+          Compact, distraction-free popup window designed to match modern developer workflows.
+        </p>
+      </div>
+
+      <div class="gallery-tabs">
+        <button class="gallery-tab-btn active" data-tab="overview">Overview & Core</button>
+        <button class="gallery-tab-btn" data-tab="theme">Theme & Hierarchy</button>
+        <button class="gallery-tab-btn" data-tab="server">Server & Caching</button>
+        <button class="gallery-tab-btn" data-tab="signals">7-Signal Verification</button>
+      </div>
+
+      <div class="gallery-display glass-card">
+        <div class="gallery-slide active" id="gallery-overview">
+          <img src="images/screenshot-overview.jpg" alt="WPScout Overview Screen" loading="lazy" width="1280" height="800">
+          <div class="gallery-caption">
+            <strong>Full Stack Overview:</strong> Core version verification against official WordPress APIs, theme badge, and quick stats.
+          </div>
+        </div>
+        <div class="gallery-slide" id="gallery-theme">
+          <img src="images/screenshot-theme.jpg" alt="WPScout Theme Inspection Screen" loading="lazy" width="1280" height="800">
+          <div class="gallery-caption">
+            <strong>Theme & Child-Theme Hierarchy:</strong> Identifies active theme, author, 4:3 screenshot, and child-to-parent relationships.
+          </div>
+        </div>
+        <div class="gallery-slide" id="gallery-server">
+          <img src="images/screenshot-server.jpg" alt="WPScout Server & Caching Screen" loading="lazy" width="1280" height="800">
+          <div class="gallery-caption">
+            <strong>Server, Hosting & Live Cache:</strong> Detects reverse proxies, Nginx/LiteSpeed, live HTTP cache hit status, and Google DoH.
+          </div>
+        </div>
+        <div class="gallery-slide" id="gallery-signals">
+          <img src="images/screenshot-signals.jpg" alt="WPScout 7-Signal Verification Screen" loading="lazy" width="1280" height="800">
+          <div class="gallery-caption">
+            <strong>Multi-Vector 7-Signal Proof:</strong> Transparent verification matrix showing every evidence signal confirmed on the page.
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Comparison Table Section -->
+  <section id="comparison" class="section">
+    <div class="container">
+      <div class="section-header text-center">
+        <div class="section-pill">Head-to-Head Comparison</div>
+        <h2 class="section-title">Why Developers Prefer WPScout</h2>
+        <p class="section-subtitle">
+          See how WPScout compares to generic multi-technology detectors and legacy web tools.
+        </p>
+      </div>
+
+      <div class="table-responsive glass-card">
+        <table class="comparison-table">
+          <thead>
+            <tr>
+              <th>Feature Capability</th>
+              <th class="col-highlight">
+                <div class="th-brand">
+                  <img src="images/icon-128.png" alt="WPScout" width="20" height="20">
+                  <span>WPScout</span>
+                </div>
+              </th>
+              <th>Generic Detectors (Wappalyzer)</th>
+              <th>Web-Based Detectors (BuiltWith)</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>REST API Namespace Probing</strong><br><small>Detects background plugins with zero frontend assets</small></td>
+              <td class="col-highlight"><span class="check-yes">✓ Deep REST Scanning</span></td>
+              <td><span class="check-no">✕ Assets only</span></td>
+              <td><span class="check-no">✕ Historical DNS only</span></td>
+            </tr>
+            <tr>
+              <td><strong>Real-Time HTTP Cache Inspection</strong><br><small>Live HIT / MISS / BYPASS detection</small></td>
+              <td class="col-highlight"><span class="check-yes">✓ Live Response Analysis</span></td>
+              <td><span class="check-no">✕ Static tags only</span></td>
+              <td><span class="check-no">✕ None</span></td>
+            </tr>
+            <tr>
+              <td><strong>Theme Child/Parent Inheritance</strong><br><small>Detects parent theme and preview screenshots</small></td>
+              <td class="col-highlight"><span class="check-yes">✓ Full Hierarchy + Preview</span></td>
+              <td><span class="check-partial">~ Partial name only</span></td>
+              <td><span class="check-partial">~ Outdated registry</span></td>
+            </tr>
+            <tr>
+              <td><strong>7-Signal Verification Matrix</strong><br><small>Eliminates false positives with multi-vector proof</small></td>
+              <td class="col-highlight"><span class="check-yes">✓ 7-Point Checklist</span></td>
+              <td><span class="check-no">✕ Single regex match</span></td>
+              <td><span class="check-no">✕ Crawl heuristics</span></td>
+            </tr>
+            <tr>
+              <td><strong>DNS-over-HTTPS & Nameservers</strong><br><small>Live A & NS record resolution via Google DoH</small></td>
+              <td class="col-highlight"><span class="check-yes">✓ Built-in Google DoH</span></td>
+              <td><span class="check-no">✕ None</span></td>
+              <td><span class="check-yes">✓ Behind paywall</span></td>
+            </tr>
+            <tr>
+              <td><strong>1-Click Developer Markdown & JSON</strong><br><small>Instant copyable diagnostic payloads for tickets</small></td>
+              <td class="col-highlight"><span class="check-yes">✓ Markdown, TXT & JSON</span></td>
+              <td><span class="check-no">✕ Pro plan required</span></td>
+              <td><span class="check-no">✕ Paid exports</span></td>
+            </tr>
+            <tr>
+              <td><strong>Privacy & Zero Telemetry</strong><br><small>Runs 100% inside your browser with no tracking</small></td>
+              <td class="col-highlight"><span class="check-yes">✓ 100% Client-Side</span></td>
+              <td><span class="check-no">✕ Tracks browsed sites</span></td>
+              <td><span class="check-no">✕ Stores search logs</span></td>
+            </tr>
+            <tr>
+              <td><strong>Pricing & Accounts</strong><br><small>Free to use forever with no credit card required</small></td>
+              <td class="col-highlight"><span class="check-yes">✓ 100% Free / No Account</span></td>
+              <td><span class="check-partial">~ Freemium / Sign in</span></td>
+              <td><span class="check-no">✕ Expensive subscriptions</span></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- Privacy First Section -->
+  <section id="privacy" class="section">
+    <div class="container">
+      <div class="privacy-box glass-card">
+        <div class="privacy-content">
+          <div class="section-pill">Zero Compromises</div>
+          <h2 class="section-title">100% Private. No Tracking. No Servers.</h2>
+          <p class="privacy-lead">
+            WPScout runs completely on your machine. We believe developer tools shouldn't spy on your browsing habits or monetize your client audits.
+          </p>
+          <div class="privacy-features-grid">
+            <div class="priv-card">
+              <div class="priv-icon">🔒</div>
+              <h4>Zero Browsing History</h4>
+              <p>WPScout only activates when you open the popup on an active tab. It never logs pages in the background.</p>
+            </div>
+            <div class="priv-card">
+              <div class="priv-icon">🛡️</div>
+              <h4>No Third-Party Analytics</h4>
+              <p>Zero tracking pixels, zero analytics SDKs, and zero telemetry payloads. Zero data ever leaves your computer.</p>
+            </div>
+            <div class="priv-card">
+              <div class="priv-icon">⚡</div>
+              <h4>Official CDNs Only</h4>
+              <p>Plugin icons are fetched directly from official WordPress.org CDNs or resolved through secure Google DNS-over-HTTPS.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- FAQ Section -->
+  <section id="faq" class="section">
+    <div class="container faq-container">
+      <div class="section-header text-center">
+        <div class="section-pill">Frequently Asked Questions</div>
+        <h2 class="section-title">Got Questions? We Have Answers.</h2>
+      </div>
+
+      <div class="faq-list">
+        <div class="faq-item glass-card active">
+          <button class="faq-question">
+            <span>How does WPScout detect plugins that don't load frontend scripts?</span>
+            <span class="faq-toggle">+</span>
+          </button>
+          <div class="faq-answer">
+            <p>
+              Most WordPress plugins register custom REST API endpoints under <code>/wp-json</code> or <code>?rest_route=/</code> (for example: WooCommerce, Yoast SEO, Contact Form 7, Wordfence, WP Rocket). WPScout queries the public REST API index to match registered namespaces against an extensive internal registry, revealing active backend plugins that standard HTML scanners miss.
+            </p>
+          </div>
+        </div>
+
+        <div class="faq-item glass-card">
+          <button class="faq-question">
+            <span>Does WPScout work on headless WordPress websites?</span>
+            <span class="faq-toggle">+</span>
+          </button>
+          <div class="faq-answer">
+            <p>
+              Yes! If the headless frontend exposes REST API Link headers, WordPress generator tags, or connects to standard WordPress REST endpoints, WPScout's multi-signal engine will verify the WordPress connection and inspect available services.
+            </p>
+          </div>
+        </div>
+
+        <div class="faq-item glass-card">
+          <button class="faq-question">
+            <span>Why does the toolbar icon change color?</span>
+            <span class="faq-toggle">+</span>
+          </button>
+          <div class="faq-answer">
+            <p>
+              WPScout provides instant passive detection: the toolbar icon lights up in vibrant blue when the active tab is identified as a WordPress website, and remains subtly dimmed on non-WordPress sites, saving you from clicking unnecessarily.
+            </p>
+          </div>
+        </div>
+
+        <div class="faq-item glass-card">
+          <button class="faq-question">
+            <span>Is WPScout really 100% free?</span>
+            <span class="faq-toggle">+</span>
+          </button>
+          <div class="faq-answer">
+            <p>
+              Yes, WPScout is completely free. There are no paid tiers, no subscription paywalls, no API token limits, and no registration requirements.
+            </p>
+          </div>
+        </div>
+
+        <div class="faq-item glass-card">
+          <button class="faq-question">
+            <span>What permissions does WPScout require and why?</span>
+            <span class="faq-toggle">+</span>
+          </button>
+          <div class="faq-answer">
+            <p>
+              WPScout uses standard Manifest V3 permissions: <code>activeTab</code> and <code>scripting</code> to inspect loaded page assets only when you open the popup; <code>https://api.wordpress.org/*</code> to compare version numbers against the official release API; and <code>https://dns.google/*</code> to resolve A/NS records securely via DNS-over-HTTPS.
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Final CTA Section -->
+  <section class="section cta-section">
+    <div class="container text-center">
+      <div class="cta-card glass-card">
+        <div class="cta-glow"></div>
+        <img src="images/icon-512.png" alt="WPScout Icon" class="cta-logo" width="80" height="80">
+        <h2 class="cta-title">Ready to Scout Any WordPress Site?</h2>
+        <p class="cta-subtitle">
+          Join thousands of developers, designers, agencies, and security auditors who rely on WPScout every day.
+        </p>
+        <div class="cta-button-wrap">
+          <a href="https://chromewebstore.google.com/detail/pnfcaepdbhbioeplilbgliegcnclpake?utm_source=parag.xyz" target="_blank" rel="noopener noreferrer" class="btn btn-primary btn-xl pulse-glow">
+            <svg class="btn-icon" viewBox="0 0 24 24" fill="currentColor" width="24" height="24">
+              <path d="M12 0C8.21 0 4.831 1.757 2.632 4.501l3.953 6.848A5.454 5.454 0 0 1 12 6.545h10.691A12 12 0 0 0 12 0zM1.931 5.47A11.943 11.943 0 0 0 0 12c0 6.012 4.42 10.991 10.189 11.864l3.953-6.847a5.45 5.45 0 0 1-6.892-2.482L1.931 5.47zm13.116 6.53a5.454 5.454 0 0 1-1.393 4.545L8.337 24A11.996 11.996 0 0 0 24 12c0-.528-.035-1.047-.1-1.556h-8.853c0 .524 0 1.056 0 1.556zM12 16a4 4 0 1 0 0-8 4 4 0 0 0 0 8z"/>
+            </svg>
+            <div class="btn-text-wrap">
+              <span class="btn-main-text">Add to Chrome — It's Free</span>
+              <span class="btn-sub-text">Takes less than 5 seconds to install</span>
+            </div>
+          </a>
+        </div>
+        <div class="cta-notes">
+          <span>★★★★★ 5.0 Star Rating</span>
+          <span>•</span>
+          <span>Manifest V3</span>
+          <span>•</span>
+          <span>Version 1.5.1</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer class="site-footer">
+    <div class="container footer-inner">
+      <div class="footer-left">
+        <div class="footer-brand">
+          <img src="images/icon-128.png" alt="WPScout" width="28" height="28">
+          <span class="footer-brand-title">WPScout</span>
+        </div>
+        <p class="footer-tagline">
+          The developer-first WordPress stack inspector for Google Chrome.
+        </p>
+      </div>
+
+      <div class="footer-links">
+        <a href="#features">Features</a>
+        <a href="#demo">Demo</a>
+        <a href="#comparison">Comparison</a>
+        <a href="#privacy">Privacy</a>
+        <a href="https://chromewebstore.google.com/detail/pnfcaepdbhbioeplilbgliegcnclpake?utm_source=parag.xyz" target="_blank" rel="noopener noreferrer">Chrome Web Store</a>
+      </div>
+
+      <div class="footer-bottom">
+        <p>&copy; 2026 WPScout &bull; Developed by <a href="https://parag.xyz" target="_blank" rel="noopener">Parag</a>. Not affiliated with the WordPress Foundation.</p>
+      </div>
+    </div>
+  </footer>
+
+  <script src="script.js"></script>
+</body>
+</html>
