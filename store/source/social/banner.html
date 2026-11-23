@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>WPScout social banner</title>
+<style>
+@font-face { font-family: Geist; src: url(../../../popup/fonts/Geist-Variable.woff2) format("woff2"); font-weight: 100 900; }
+@font-face { font-family: GeistMono; src: url(../../../popup/fonts/GeistMono-Variable.woff2) format("woff2"); font-weight: 100 900; }
+:root { --bg: #0F1215; --card: #171B20; --line: #252B32; --ink: #F4F6F8; --ink2: #A9B2BC; --ink3: #6E7781; --blue: #38BDF8; --blue2: #0284C7; }
+* { box-sizing: border-box; margin: 0; }
+html, body { background: var(--bg); }
+body { font-family: Geist, system-ui, sans-serif; color: var(--ink); -webkit-font-smoothing: antialiased; }
+.c { position: relative; overflow: hidden; background: var(--bg); }
+.c::before { content: ""; position: absolute; inset: 0; background:
+  radial-gradient(600px 380px at 100% 0%, rgba(2,132,199,.22), transparent 70%),
+  radial-gradient(500px 340px at 0% 100%, rgba(56,189,248,.08), transparent 70%); }
+.c::after { content: ""; position: absolute; inset: 0; background-image: linear-gradient(var(--line) 1px, transparent 1px), linear-gradient(90deg, var(--line) 1px, transparent 1px); background-size: 40px 40px; opacity: .18; mask-image: radial-gradient(ellipse at 70% 30%, #000 10%, transparent 70%); }
+.in { position: relative; z-index: 1; height: 100%; display: flex; flex-direction: column; }
+.brand { display: flex; align-items: center; gap: 12px; font-weight: 600; letter-spacing: -.01em; }
+.brand svg { display: block; border-radius: 10px; box-shadow: 0 0 0 1px rgba(255,255,255,.08); }
+.pill { margin-left: auto; font-size: 13px; font-weight: 500; color: var(--blue); border: 1px solid rgba(56,189,248,.35); background: rgba(56,189,248,.08); padding: 6px 12px; border-radius: 999px; }
+h1 { font-weight: 650; letter-spacing: -.035em; line-height: 1.02; }
+h1 em { font-style: normal; color: var(--blue); }
+.sub { color: var(--ink2); line-height: 1.45; text-wrap: balance; }
+.grid { display: grid; gap: 10px; }
+.f { display: flex; align-items: center; gap: 11px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 0 14px; font-weight: 500; letter-spacing: -.01em; white-space: nowrap; }
+.f i { flex: none; display: grid; place-items: center; border-radius: 8px; background: rgba(56,189,248,.1); color: var(--blue); }
+.f i svg { display: block; }
+.foot { display: flex; align-items: center; gap: 14px; color: var(--ink3); font-size: 14px; }
+.foot b { color: var(--ink); font-weight: 600; }
+.dot { width: 4px; height: 4px; border-radius: 50%; background: var(--ink3); }
+
+/* 1200 × 630 */
+.wide { width: 1200px; height: 630px; }
+.wide .in { padding: 52px 60px 44px; }
+.wide .brand { font-size: 22px; }
+.wide .top { display: grid; grid-template-columns: 430px 1fr; gap: 44px; margin-top: 40px; flex: 1; }
+.wide h1 { font-size: 54px; }
+.wide .sub { font-size: 18px; margin-top: 20px; max-width: 400px; }
+.wide .grid { grid-template-columns: 1fr 1fr; align-content: start; }
+.wide .f { height: 50px; font-size: 15.5px; }
+.wide .f i { width: 30px; height: 30px; }
+
+/* 1080 × 1080 */
+.sq { width: 1080px; height: 1080px; }
+.sq .in { padding: 72px 76px 64px; }
+.sq .brand { font-size: 26px; }
+.sq h1 { font-size: 76px; margin-top: 64px; }
+.sq .sub { font-size: 22px; margin-top: 22px; max-width: 760px; }
+.sq .grid { grid-template-columns: 1fr 1fr; margin-top: 48px; gap: 12px; }
+.sq .f { height: 64px; font-size: 20px; gap: 14px; padding: 0 18px; border-radius: 14px; }
+.sq .f i { width: 38px; height: 38px; border-radius: 10px; }
+.sq .f i svg { width: 20px; height: 20px; }
+.sq .foot { margin-top: auto; font-size: 18px; }
+.sq .pill { font-size: 16px; padding: 8px 16px; }
+.wide .foot { margin-top: auto; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<template id="logo"><svg width="40" height="40" viewBox="0 0 128 128"><rect width="128" height="128" rx="28" fill="#1E242B"/><g transform="translate(0 4)"><path d="M64 24 100 42 64 60 28 42Z" fill="#fff" stroke="#fff" stroke-width="4" stroke-linejoin="round"/><path d="M30 60 64 77 98 60" fill="none" stroke="#fff" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/><path d="M30 78 64 95 98 78" fill="none" stroke="rgba(255,255,255,.55)" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/></g></svg></template>
+<script>
+const I = (d) => `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${d}</svg>`;
+const F = [
+  ['Version and updates', I('<path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/>')],
+  ['Theme and plugins', I('<path d="M12 2v4M12 18v4M4.9 4.9l2.8 2.8M16.3 16.3l2.8 2.8M2 12h4M18 12h4"/><circle cx="12" cy="12" r="3"/>')],
+  ['Known vulnerabilities', I('<path d="M12 3 4 6v6c0 5 3.5 8 8 9 4.5-1 8-4 8-9V6Z"/><path d="M12 9v4M12 16.5v.01"/>')],
+  ['Plugin health', I('<path d="M3 12h4l2-5 4 10 2-5h6"/>')],
+  ['Security checks', I('<rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/>')],
+  ['SEO audit', I('<circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/>')],
+  ['Performance', I('<path d="M12 14l4-4"/><path d="M3.5 18a10 10 0 1 1 17 0"/>')],
+  ['Hosting, server and CDN', I('<rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 16.5h.01"/>')],
+  ['Analytics and tracking', I('<path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/>')],
+  ['Content stats', I('<path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9Z"/><path d="M14 3v6h6M8 13h8M8 17h5"/>')],
+  ['Fonts and libraries', I('<path d="M4 7V5h16v2M9 19h6M12 5v14"/>')],
+  ['Copy or export reports', I('<path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 21h14"/>')]
+];
+const sq = location.hash === '#square' || location.search.includes('square');
+const logo = document.getElementById('logo').innerHTML.replace(/width="40" height="40"/, sq ? 'width="48" height="48"' : 'width="40" height="40"');
+const grid = `<div class="grid">${F.map(([t, i]) => `<div class="f"><i>${i}</i>${t}</div>`).join('')}</div>`;
+const head = `<div class="brand">${logo}WPScout<span class="pill">Free Chrome extension</span></div>`;
+const h1 = `<h1>Scout any <em>WordPress</em> site in one click</h1>`;
+const sub = `<p class="sub">See how it’s built, what’s out of date, and what’s exposed, right from your toolbar.</p>`;
+const foot = `<div class="foot"><b>Chrome Web Store</b><span class="dot"></span>No account<span class="dot"></span>No tracking<span class="dot"></span>Light and dark</div>`;
+document.getElementById('root').innerHTML = sq
+  ? `<div class="c sq"><div class="in">${head}${h1}${sub}${grid}${foot}</div></div>`
+  : `<div class="c wide"><div class="in">${head}<div class="top"><div>${h1}${sub}</div>${grid}</div>${foot}</div></div>`;
+</script>
+</body>
+</html>

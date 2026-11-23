@@ -8,7 +8,7 @@
 [![Manifest V3](https://img.shields.io/badge/Manifest-V3-success)](https://developer.chrome.com/docs/extensions/mv3/intro/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-![WPScout Preview](screenshot-1280x800.png)
+![WPScout Preview](store/screenshot-1-overview.png)
 
 ---
 
@@ -20,122 +20,38 @@
 
 ---
 
-## 🚀 Overview
 
-**WPScout** is a lightweight, non-intrusive, and comprehensive WordPress stack inspection and diagnostics extension designed for developers, site auditors, designers, agencies, and curious web enthusiasts.
+## Overview
 
-With a single click, instantly uncover the entire technology stack powering any WordPress website—including core version, active theme and child-theme inheritance, detected plugins, hosting infrastructure, server software, live caching headers, and DNS details.
+A Chrome extension (Manifest V3) that detects whether a site runs WordPress and shows its stack: version, theme, plugins, page builder, server, PHP, CDN, cache status, IP, host and DNS, along with the evidence for each finding.
 
----
 
-## ✨ Key Features
+## How it works
 
-### 🔍 1. WordPress Core & Theme Intelligence
-- Accurately detects whether any page is powered by WordPress.
-- **Dynamic Toolbar Icon:** Automatically lights up in vibrant blue with a **live plugin count badge** on WordPress sites, and dims on non-WordPress sites.
-- **Core Version Verification:** Compares the active site's version against the official WordPress.org release matrix.
-- **Theme & Hierarchy:** Displays active theme name, version, author, child-theme parent relationships, and 4:3 screenshot previews.
+| File | Role |
+|---|---|
+| `content.js` | Runs on every page. A fast DOM check decides whether the page is WordPress, then `detectWordPress()` scans assets, inline scripts and styles, the response headers, `/wp-json` and the theme's `style.css`. Network checks run in parallel. |
+| `background.js` | Service worker. Caches each tab's report in `chrome.storage.session`, sets the toolbar badge (plugin count), resolves the IP and nameservers (Google DNS) and the network and location (ipwho.is). It also caches those lookups per host and the REST API index per origin. |
+| `popup/` | The 420 × 600 popup with Overview, Plugins, Stack, Checks and Evidence tabs, plus a settings pane for optional Wordfence and WPScan keys. It reads the cached report and adds names and icons from WordPress.org. `detect.js` is a copy of the detector, injected only when the content script can't be reached; keep it in sync with `content.js`. |
 
-### 🧩 2. Deep Plugin Discovery (Assets + REST API)
-- **REST API Namespace Probing:** Queries `/wp-json` and `?rest_route=/` to discover active background plugins that don't load frontend scripts or CSS.
-- **Confirmed Plugins First:** Plugins with confirmed version numbers are automatically sorted to the top.
-- **High-Resolution Icons:** Fetches official WordPress.org CDN icons across PNG, SVG, WebP, and JPG formats, with smart fallbacks for premium plugins.
-- **Live Search & Filter:** Instant search filter across detected plugins with direct links to official documentation.
+## Develop
 
-### ⚡ 3. Real-Time HTTP Cache Inspection
-- Inspects HTTP response headers (`cf-cache-status`, `x-litespeed-cache`, `x-cache`, `server-timing`, `cache-control`).
-- Displays live status indicators: **`HIT`**, **`MISS`**, **`BYPASS`**, or **`DYNAMIC`**.
-- Detects caching layers: Cloudflare, LiteSpeed Cache, WP Rocket, Varnish, Fastly, FastCGI.
+1. Open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked** and pick this folder.
+2. After editing, click **Reload** on the extension card, then refresh the tab you're testing.
+3. To preview the popup without the extension, open `popup/popup.html` in a browser tab. It uses sample data. Add a hash to pick a view: `#plugins`, `#hosting`, `#evidence`, `#dark`, `#loading`, `#empty`, `#internal`, `#menu`.
 
-### 🌐 4. Server, Hosting & Datacenter Resolution
-- **Server Software:** Identifies Nginx, Apache, LiteSpeed, OpenLiteSpeed, Caddy, etc.
-- **Managed Hosting Platforms:** Detects WP Engine, Kinsta, Cloudflare, Pantheon, Sucuri, and more.
-- **PHP Runtime:** Displays exposed PHP version numbers.
-- **Google DNS-over-HTTPS (DoH):** Resolves IPv4 Host IP (A record) and Authoritative Nameservers (NS records) securely without tracking.
+## Release
 
-### 🛡️ 5. 7-Signal Diagnostic Verification
-Multi-vector verification checklist guarantees zero false positives:
-1. `wp-json` REST API endpoint detected
-2. `wp-json` in HTTP response `Link` header
-3. WordPress generator meta tag
-4. `/wp-content/` frontend script & style asset paths
-5. `/wp-includes/` core scripts & block libraries
-6. `link rel="https://api.w.org/"` DOM tags
-7. Verified admin login & session indicators (`wp-login.php`, `#wpadminbar`)
-
-### 📋 6. Developer Export Tools
-- **One-Click Markdown:** Formatted diagnostic report ready to paste into bug trackers or GitHub issues.
-- **Export JSON:** Full structured diagnostic JSON payload for client audits.
-- **Download TXT:** Plain-text formatted report file.
-
-### 🌓 7. UI/UX Polish & Dark/Light Mode
-- Compact 420px non-wide layout fitting standard extension viewports.
-- Automatic light/dark mode adaptation matching operating system settings.
-- 100% client-side execution—no telemetry, no tracking, and no account required.
-
----
-
-## 📁 Repository Structure
-
-```text
-WPScout/
-├── extension/                       # Chrome Extension (Manifest V3 - v1.5.1)
-│   ├── manifest.json                # Extension manifest configuration
-│   ├── background.js                # Service worker for badges, tab awareness & session caching
-│   ├── content.js                   # Fast passive inspection content script
-│   ├── icons/                       # Extension action icons (16, 32, 48, 128)
-│   ├── popup/                       # Popup dashboard (HTML, CSS, JS)
-│   └── README.md                    # Extension documentation
-│
-├── website/                         # Official Landing Page (Live at parag.xyz/WPScout/)
-│   ├── index.html                   # Responsive landing page with light/dark mode
-│   ├── style.css                    # Modern developer-grade CSS design system
-│   ├── script.js                    # Interactive demo simulator & gallery scripts
-│   └── images/                      # Optimized screenshots, icons & banners
-│
-├── store-assets/                    # Chrome Web Store graphics & promotional assets
-│   ├── promo-marquee-1400x560.png   # Store marquee banner
-│   ├── promo-small-440x280.png      # Promo thumbnail
-│   ├── screenshot-1-overview.png    # High-resolution store screenshots
-│   └── store-icon-512x512.png       # 512x512 store icon
-│
-├── CHROMEWEBSTORE.md                # Chrome Web Store listing metadata & justifications
-├── PRIVACY_POLICY.md                # Compliance privacy policy
-└── README.md                        # Master repository documentation
+```bash
+./scripts/build.sh
 ```
 
----
+This writes `dist/wpscout-<version>.zip` containing only the runtime files. Store images and listing text are in `store/` (see `store/LISTING.md`).
 
-## 🛠️ Installation & Development
 
-### Method A: Install from Chrome Web Store (Recommended)
-Install the official verified extension with automatic updates:
-👉 **[Add WPScout to Chrome](https://chromewebstore.google.com/detail/pnfcaepdbhbioeplilbgliegcnclpake?utm_source=parag.xyz)**
+Store screenshots and promo tiles are rendered from `store/source/store-template/store.html`; social images from `store/source/social/`.
 
-### Method B: Load Unpacked in Developer Mode
-1. Clone this repository:
-   ```bash
-   git clone https://github.com/parag44/WPScout.git
-   ```
-2. Open Google Chrome and navigate to `chrome://extensions/`.
-3. Enable **Developer mode** toggle in the top-right corner.
-4. Click **Load unpacked** in the top-left corner.
-5. Select the `extension/` directory.
-6. Pin **WPScout** to your Chrome toolbar!
-
----
-
-## 🔒 Permissions & Privacy
-
-WPScout is strictly committed to privacy and developer transparency:
-- `activeTab` & `scripting`: Runs inspection scripts only on the currently active tab when the popup is accessed.
-- `storage`: Caches pre-fetched results in browser session storage (`chrome.storage.session`) for instant rendering.
-- `https://api.wordpress.org/*`: Verifies core version status against the official WordPress API.
-- `https://dns.google/*`: Resolves domain A and NS records securely via Google DNS-over-HTTPS.
-
-**100% Client-Side:** No browsing history is tracked, no personal data is collected, and no analytics or telemetry scripts are included.
-
----
+The marketing site is in `website/`.
 
 ## 📄 License
 

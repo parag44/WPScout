@@ -1,1153 +1,1687 @@
-// ==========================================
-// 1. CONTENT SCRIPT EXECUTED IN TAB
-// ==========================================
-async function detectWordPress() {
-  let isWP = false;
-  let version = 'Unknown';
-  let theme = 'Unknown';
-  let themeVersion = '';
-  const pluginsMap = new Map();
+// ==========================================================================
+// WPScout popup controller
+// Reads the cached report for the active tab (or asks the content script to
+// rescan), enriches it with DNS / ISP / WordPress.org data, and renders the
+// four-tab popup: Overview, Plugins, Hosting, Evidence.
+// The fallback detector `detectWordPress` lives in detect.js.
+// ==========================================================================
 
-  // 1. Check Generator Meta Tag
-  const generatorMeta = document.querySelector('meta[name="generator"]');
-  if (generatorMeta && generatorMeta.content.toLowerCase().includes('wordpress')) {
-    isWP = true;
-    const match = generatorMeta.content.match(/WordPress\s+([0-9a-zA-Z.-]+)/i);
-    if (match) version = match[1];
+(() => {
+  'use strict';
+
+  const $ = (id) => document.getElementById(id);
+  const hasChrome = typeof chrome !== 'undefined' && chrome.tabs && chrome.tabs.query;
+  const APP_VERSION = (() => { try { return chrome.runtime.getManifest().version; } catch (e) { return ''; } })();
+
+  let report = null;          // current WordPress report
+  let currentTab = null;      // chrome tab object
+  let activeCat = 'All';
+  let fromCache = false;
+
+  // ------------------------------------------------------------------ icons
+  const ICON = {
+    chev: '<svg class="chev" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>',
+    check: '<svg class="ck" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9" stroke-width="1.6"/><path d="m8.5 12.5 2.5 2.5 4.5-5"/></svg>',
+    miss: '<svg class="ck no" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M8.5 12h7"/></svg>',
+    copy: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2.5"/><path d="M16 8V6.5A2.5 2.5 0 0 0 13.5 4h-7A2.5 2.5 0 0 0 4 6.5v7A2.5 2.5 0 0 0 6.5 16H8"/></svg>',
+    ext: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 4h6v6"/><path d="M20 4 10 14"/><path d="M18 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4"/></svg>',
+    lock: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>'
+  };
+
+  // ------------------------------------------------------------------ utils
+  const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const decode = (s) => String(s || '').replace(/&#8211;/g, '–').replace(/&#8212;/g, '—').replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#0?39;/g, "'");
+  const known = (v) => v && v !== 'Unknown' && v !== 'None Detected' && v !== 'None';
+  const stripFlag = (s) => String(s || '').replace(/^[\u{1F1E6}-\u{1F1FF}]{2}\s*/u, '');
+  const hostOf = (url) => { try { return new URL(url).hostname.replace(/^www\./, ''); } catch (e) { return url || ''; } };
+  const monogram = (name) => {
+    const words = String(name || '?').replace(/[^\p{L}\p{N}\s-]/gu, ' ').split(/[\s-]+/).filter(Boolean);
+    return ((words[0] || '?')[0] + (words[1] ? words[1][0] : '')).toUpperCase();
+  };
+
+  function fetchWithTimeout(resource, options = {}, timeout = 3000) {
+    const controller = new AbortController();
+    const id = setTimeout(() => controller.abort(), timeout);
+    return fetch(resource, { ...options, signal: controller.signal }).finally(() => clearTimeout(id));
   }
 
-  // 2. Scan stylesheets and scripts for wp-content patterns
-  const elements = document.querySelectorAll('link[rel="stylesheet"], script[src]');
-  
-  elements.forEach(el => {
-    const url = el.href || el.src;
-    if (!url) return;
-    if (url.includes('wp-content/')) isWP = true;
+  function openUrl(url) {
+    // Only open web pages: URLs built from scanned page data must never become javascript: or chrome: links.
+    try { if (!/^https?:$/.test(new URL(url).protocol)) return; } catch (e) { return; }
+    if (hasChrome && chrome.tabs.create) chrome.tabs.create({ url });
+    else window.open(url, '_blank', 'noopener');
+  }
 
-    const themeMatch = url.match(/\/wp-content\/themes\/([^\/]+)\//i);
-    if (themeMatch) {
-      theme = themeMatch[1];
-      const verMatch = url.match(/(?:\?|&)ver=([0-9a-zA-Z.-]+)/i);
-      if (verMatch && verMatch[1] !== version) themeVersion = verMatch[1];
+  async function copyText(text, msg) {
+    try {
+      await navigator.clipboard.writeText(text);
+      toast(msg);
+    } catch (e) {
+      toast('Couldn’t copy. Your browser blocked clipboard access.');
     }
+  }
 
-    const pluginMatch = url.match(/\/wp-content\/plugins\/([^\/]+)\//i);
-    if (pluginMatch) {
-      const slug = pluginMatch[1];
-      let pVer = '';
-      const verMatch = url.match(/(?:\?|&)ver=([0-9a-zA-Z.-]+)/i);
-      if (verMatch && verMatch[1] !== version) pVer = verMatch[1];
-      
-      const existing = pluginsMap.get(slug);
-      if (!existing || (pVer && !existing.version)) {
-        pluginsMap.set(slug, {
-          slug,
-          version: pVer,
-          method: 'Frontend Asset',
-          evidence: url
-        });
+  let toastTimer = null;
+  function toast(msg) {
+    const t = $('toast');
+    t.textContent = msg;
+    t.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => t.classList.remove('show'), 1800);
+  }
+
+  // ------------------------------------------------------------------ theme
+  const THEME_KEY = 'wpscout_theme';
+  function storedTheme() {
+    try {
+      const v = localStorage.getItem(THEME_KEY);
+      if (v === 'light' || v === 'dark') return v;
+      const legacy = localStorage.getItem('wp_detector_theme');
+      if (legacy === 'theme-light' || legacy === 'theme-dark') return legacy.replace('theme-', '');
+    } catch (e) {}
+    return null;
+  }
+  function effectiveDark() {
+    const a = document.documentElement.getAttribute('data-theme');
+    return a ? a === 'dark' : window.matchMedia('(prefers-color-scheme: dark)').matches;
+  }
+  function syncThemeLabel() { $('theme-label').textContent = effectiveDark() ? 'Light theme' : 'Dark theme'; }
+  function applyTheme(t) {
+    if (t) document.documentElement.setAttribute('data-theme', t);
+    else document.documentElement.removeAttribute('data-theme');
+    syncThemeLabel();
+  }
+  function toggleTheme() {
+    const next = effectiveDark() ? 'light' : 'dark';
+    applyTheme(next);
+    try { localStorage.setItem(THEME_KEY, next); } catch (e) {}
+  }
+
+  // ------------------------------------------------------------------ network enrichment
+  async function getHostIP(hostname) {
+    try {
+      const res = await fetchWithTimeout(`https://dns.google/resolve?name=${encodeURIComponent(hostname)}&type=A`, {}, 3000);
+      const data = await res.json();
+      if (data.Answer && data.Answer.length) return data.Answer.map((a) => a.data).find((ip) => /^[0-9.]+$/.test(ip)) || 'Unknown';
+    } catch (e) {}
+    return 'Unknown';
+  }
+
+  async function getNameservers(hostname) {
+    try {
+      const parts = hostname.split('.');
+      const apex = parts.length > 2 ? parts.slice(-2).join('.') : hostname;
+      const res = await fetchWithTimeout(`https://dns.google/resolve?name=${encodeURIComponent(apex)}&type=NS`, {}, 3000);
+      const data = await res.json();
+      if (data.Answer && data.Answer.length) return data.Answer.map((a) => a.data.replace(/\.$/, '')).slice(0, 2).join(', ');
+    } catch (e) {}
+    return 'Unknown';
+  }
+
+  async function getISPAndLocation(ip) {
+    if (!ip || ip === 'Unknown' || ip.startsWith('127.') || ip === 'localhost') return { isp: 'Localhost / private', location: 'Internal network' };
+    try {
+      const res = await fetchWithTimeout(`https://ipwho.is/${encodeURIComponent(ip)}`, {}, 3000);
+      const data = await res.json();
+      if (data && data.success) {
+        return {
+          isp: (data.connection && data.connection.isp) || 'Unknown',
+          location: [data.city, data.region, data.country_code].filter(Boolean).join(', ') || 'Unknown'
+        };
       }
-    }
+    } catch (e) {}
+    return { isp: 'Unknown', location: 'Unknown' };
+  }
+
+  async function enrichNetwork(data) {
+    const host = new URL(data.url).hostname;
+    data.hostname = host;
+    const [ip, ns] = await Promise.all([getHostIP(host), getNameservers(host)]);
+    data.ip = ip;
+    data.dns = ns;
+    const geo = await getISPAndLocation(ip);
+    data.isp = geo.isp;
+    data.location = geo.location;
+    return data;
+  }
+
+  // ------------------------------------------------------------------ WordPress.org metadata
+  function deriveProPluginTitle(rawBaseName, proSlug) {
+    let name = decode(rawBaseName).trim();
+    const m = name.match(/^(.+?)\s*(?:[–—]| - | : |: | \| )\s*(.+)$/);
+    if (m && m[1].trim().length >= 2) name = m[1].trim();
+    name = name.replace(/\s*\((?:acf|free|lite)\)/i, '')
+      .replace(/\s+(?:website builder|page builder|builder|customizer framework|wordpress plugin|plugin for wordpress|framework)$/i, '')
+      .trim();
+    const p = proSlug.toLowerCase();
+    const edition = p.endsWith('-premium') ? 'Premium'
+      : /-addons?$/.test(p) ? 'Addons'
+      : /-extensions?$/.test(p) ? 'Extensions'
+      : p.endsWith('-plus') ? 'Plus'
+      : p.endsWith('-unlimited') ? 'Unlimited'
+      : p.endsWith('-core') ? 'Core' : 'Pro';
+    return name.toLowerCase().endsWith(edition.toLowerCase()) ? name : `${name} ${edition}`;
+  }
+
+  // Plugin names are often "Brand – long marketing tagline". Keep the brand.
+  function shortName(name) {
+    const n = decode(name).trim();
+    const m = n.match(/^(.{3,40}?)\s+(?:[–—]|-|:|\|)\s+.{8,}$/);
+    return m ? m[1].trim() : n;
+  }
+
+  const pluginMetaCache = new Map();
+  function fetchPluginMeta(slug) {
+    const clean = (slug || '').toLowerCase().trim();
+    if (!clean) return Promise.resolve(null);
+    if (pluginMetaCache.has(clean)) return pluginMetaCache.get(clean);
+    const job = (async () => {
+      const base = clean.replace(/-(?:pro|premium|addon|addons|extension|extensions|plugin|core|config|lite|master|plus|unlimited)$/i, '');
+      const tries = base && base !== clean ? [clean, base] : [clean];
+      for (const s of tries) {
+        try {
+          const res = await fetch(`https://api.wordpress.org/plugins/info/1.2/?action=plugin_information&request[slug]=${encodeURIComponent(s)}&request[fields][icons]=1&request[fields][active_installs]=1&request[fields][sections]=0`, { cache: 'force-cache' });
+          const data = await res.json().catch(() => null);
+          // Closed plugins answer with an error but still carry name, date and reason.
+          if (data && data.error === 'closed' && s === clean) {
+            return { name: decode(data.name || ''), iconUrl: null, wpOrgSlug: s, isPro: false, latest: '',
+              health: { closed: true, closedDate: data.closed_date || '', closedReason: data.reason_text || data.reason || '' } };
+          }
+          if (!res.ok || !data || !(data.name || data.icons)) continue;
+          const isPro = s !== clean;
+          const icon = data.icons ? (data.icons['2x'] || data.icons['1x'] || data.icons.svg || data.icons.default) : null;
+          return {
+            name: data.name ? (isPro ? deriveProPluginTitle(data.name, clean) : decode(data.name)) : '',
+            iconUrl: icon ? icon.replace(/^http:\/\//i, 'https://') : null,
+            wpOrgSlug: s,
+            isPro,
+            latest: isPro ? '' : String(data.version || ''),
+            // Plugin health from the same response (no extra requests). Only for the exact slug.
+            health: isPro ? null : {
+              closed: false,
+              lastUpdated: String(data.last_updated || '').replace(/\s.*$/, ''),
+              tested: String(data.tested || ''),
+              requiresPhp: String(data.requires_php || ''),
+              activeInstalls: Number(data.active_installs || 0),
+              rating: Number(data.rating || 0),
+              numRatings: Number(data.num_ratings || 0)
+            }
+          };
+        } catch (e) {}
+      }
+      return null;
+    })();
+    pluginMetaCache.set(clean, job);
+    return job;
+  }
+
+  // Chrome shows the popup only after its load event, and every <img> request
+  // started before then holds that event back. So icons (and the favicon) wait
+  // for load, and come from the WordPress.org API instead of guessing CDN URLs.
+  const popupLoaded = new Promise((resolve) => {
+    const done = () => requestAnimationFrame(() => resolve());
+    if (document.readyState === 'complete') done();
+    else window.addEventListener('load', done, { once: true });
   });
 
-  // 3. Try to get headers & caching signals
-  let serverSoftware = 'Unknown';
-  let proxyCDN = 'None Detected';
-  let phpVersion = 'Unknown';
-  let cacheSystem = 'None Detected';
-  let cacheHeaderStatus = 'Unknown';
-  let cacheDetail = '';
-  const urlParams = new URL(document.location.href);
-
-  // Helper to normalize cache status values across plugins & servers
-  function parseCacheStatus(raw) {
-    if (!raw) return 'Unknown';
-    const s = raw.trim();
-    const upper = s.toUpperCase();
-
-    // 1. In-progress / saving states
-    if (upper.includes('SAVING')) {
-      return 'Saving to Cache';
+  const iconCache = new Map();
+  function resolvePluginIcon(slug) {
+    const clean = (slug || '').toLowerCase().trim();
+    if (!iconCache.has(clean)) {
+      iconCache.set(clean, fetchPluginMeta(clean).then((meta) => (meta && meta.iconUrl) || null).catch(() => null));
     }
-    // 2. Explicit bypass / disabled / not cached
-    if (upper.includes('NOT CACHED') || upper.includes('NO-CACHE') || upper.includes('BYPASS') || upper.includes('DISABLED') || upper.includes('EXCLUDED')) {
-      return 'BYPASS';
-    }
-    // 3. Cache Hits
-    if (upper.includes('HIT') || upper.includes('CACHED') || upper.includes('SUPERCACHE') || upper.includes('WP-CACHE') || upper === 'ACTIVE') {
-      return 'HIT';
-    }
-    // 4. Cache Misses
-    if (upper.includes('MISS')) {
-      return 'MISS';
-    }
-    // 5. CDN / Proxy specific states
-    if (upper.includes('DYNAMIC')) {
-      return 'DYNAMIC';
-    }
-    if (upper.includes('EXPIRED')) {
-      return 'EXPIRED';
-    }
-    if (upper.includes('STALE')) {
-      return 'STALE';
-    }
-    if (upper.includes('REVALIDATED')) {
-      return 'REVALIDATED';
-    }
-    if (upper.includes('UPDATING')) {
-      return 'UPDATING';
-    }
-
-    return s.length > 20 ? s.substring(0, 20) : s;
+    return iconCache.get(clean).then((url) => popupLoaded.then(() => url));
   }
 
-  const knownCacheRules = [
-    // WordPress Cache Plugins
-    { header: 'wpo-cache-status', system: 'WP-Optimize', pluginSlug: 'wp-optimize' },
-    { header: 'x-wpo-cache-status', system: 'WP-Optimize', pluginSlug: 'wp-optimize' },
-    { header: 'x-litespeed-cache', system: 'LiteSpeed Cache', pluginSlug: 'litespeed-cache' },
-    { header: 'x-litespeed-cache-control', system: 'LiteSpeed Cache', pluginSlug: 'litespeed-cache' },
-    { header: 'x-lsadc-cache', system: 'LiteSpeed Cache', pluginSlug: 'litespeed-cache' },
-    { header: 'wp-super-cache', system: 'WP Super Cache', pluginSlug: 'wp-super-cache' },
-    { header: 'x-super-cache', system: 'WP Super Cache', pluginSlug: 'wp-super-cache' },
-    { header: 'x-w3tc-pagecache', system: 'W3 Total Cache', pluginSlug: 'w3-total-cache' },
-    { header: 'x-w3tc-min', system: 'W3 Total Cache', pluginSlug: 'w3-total-cache' },
-    { header: 'x-flying-press-cache', system: 'FlyingPress', pluginSlug: 'flying-press' },
-    { header: 'flying-press-cache', system: 'FlyingPress', pluginSlug: 'flying-press' },
-    { header: 'x-nitro-cache', system: 'NitroPack', pluginSlug: 'nitropack' },
-    { header: 'nitro-cache', system: 'NitroPack', pluginSlug: 'nitropack' },
-    { header: 'x-breeze-cache', system: 'Breeze Cache', pluginSlug: 'breeze' },
-    { header: 'x-cache-handler', system: 'Cache Enabler', pluginSlug: 'cache-enabler' },
-    { header: 'x-wp-cf-super-cache-active', system: 'Super Page Cache', pluginSlug: 'wp-cloudflare-super-page-cache' },
-    { header: 'x-sg-cache', system: 'SiteGround Cache', pluginSlug: 'sg-cachepress' },
-    { header: 'x-siteground-cache', system: 'SiteGround Cache', pluginSlug: 'sg-cachepress' },
+  function formatThemeName(slug) {
+    if (!known(slug)) return 'Unknown';
+    const clean = slug.toLowerCase().trim();
+    const names = {
+      twentytwentyfive: 'Twenty Twenty-Five', twentytwentyfour: 'Twenty Twenty-Four', twentytwentythree: 'Twenty Twenty-Three',
+      twentytwentytwo: 'Twenty Twenty-Two', twentytwentyone: 'Twenty Twenty-One', twentytwenty: 'Twenty Twenty',
+      twentynineteen: 'Twenty Nineteen', twentyseventeen: 'Twenty Seventeen', twentysixteen: 'Twenty Sixteen',
+      astra: 'Astra', generatepress: 'GeneratePress', 'hello-elementor': 'Hello Elementor', kadence: 'Kadence',
+      oceanwp: 'OceanWP', neve: 'Neve', blocksy: 'Blocksy', flatsome: 'Flatsome', divi: 'Divi'
+    };
+    return names[clean] || clean.split(/[-_]+/).map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+  }
 
-    // Cloud / CDN / Platform / Reverse Proxy Caches
-    { header: 'cf-cache-status', system: 'Cloudflare' },
-    { header: 'x-kinsta-cache', system: 'Kinsta Cache' },
-    { header: 'x-wpengine-cache', system: 'WP Engine Cache' },
-    { header: 'x-pantheon-styx-edge-cache', system: 'Pantheon Styx' },
-    { header: 'x-varnish-cache', system: 'Varnish' },
-    { header: 'x-varnish', system: 'Varnish' },
-    { header: 'x-fastcgi-cache', system: 'Nginx FastCGI' },
-    { header: 'x-nginx-cache', system: 'Nginx Cache' },
-    { header: 'x-proxy-cache', system: 'Proxy Cache' },
-    { header: 'x-cache-status', system: 'Server Cache' },
-    { header: 'x-cache', system: 'Edge/Server Cache' },
-    { header: 'x-fastly-cache-status', system: 'Fastly' },
-    { header: 'fastly-cache-status', system: 'Fastly' },
-    { header: 'x-sucuri-cache', system: 'Sucuri Cache' },
-    { header: 'x-run-cloud-cache', system: 'RunCloud Cache' },
-    { header: 'x-gridpane-cache', system: 'GridPane Cache' }
+  const themeMetaCache = new Map();
+  function fetchThemeMeta(slug) {
+    const clean = (slug || '').toLowerCase().trim();
+    if (!known(clean)) return Promise.resolve(null);
+    if (themeMetaCache.has(clean)) return themeMetaCache.get(clean);
+    const job = (async () => {
+      try {
+        const res = await fetch(`https://api.wordpress.org/themes/info/1.2/?action=theme_information&request[slug]=${encodeURIComponent(clean)}`, { cache: 'force-cache' });
+        if (!res.ok) return null;
+        const data = await res.json();
+        if (!data || !data.name) return null;
+        let author = '';
+        if (data.author && typeof data.author === 'object') author = data.author.display_name || data.author.author || data.author.user_nicename || '';
+        else if (typeof data.author === 'string') author = data.author.replace(/<[^>]+>/g, '').trim();
+        return { name: decode(data.name), version: data.version || '', author };
+      } catch (e) { return null; }
+    })();
+    themeMetaCache.set(clean, job);
+    return job;
+  }
+
+  // ------------------------------------------------------------------ plugin helpers
+  const SOURCE_LABEL = { API: 'REST API', URL: 'Asset URL', HEADER: 'HTTP header', DOM: 'Page source' };
+  function hasVersion(p) {
+    const v = String((p && p.version) || '').trim();
+    // Real versions start with a digit and are short ("5.9.5", "6.2.0.1", "2.0-beta").
+    // Cache-busting hashes passed as ?ver= ("ecf94842061bea03d54b") are not versions.
+    return /^\d[\w.+-]{0,19}$/.test(v) && !/^\d{9,}$/.test(v) && !/^[0-9a-f]{12,}$/i.test(v);
+  }
+  const pluginName = (p) => shortName(p.displayName || p.name || p.slug);
+  function sortedPlugins(list) {
+    return [...list].sort((a, b) => (hasVersion(b) - hasVersion(a)) || pluginName(a).localeCompare(pluginName(b)));
+  }
+
+  const METHOD_LABEL = {
+    'Frontend Asset': 'a plugin file the page loads',
+    'Inline Script Data (wp_localize_script)': 'inline script data (wp_localize_script)',
+    'Inlined CSS Asset': 'inline CSS',
+    'Block Asset Handle': 'a block stylesheet handle',
+    'Integration Signature': 'an integration script on the page',
+    'HTTP Cache Header': 'an HTTP cache header',
+    'HTML Comment Signature': 'an HTML comment',
+    'REST API Namespace': 'the REST API namespace list',
+    'REST API Sub-route': 'a REST API route'
+  };
+  const methodLabel = (m) => METHOD_LABEL[m] || m;
+
+  function pluginRowHTML(p) {
+    const ver = p.latest ? verArrow(p.version, p.latest) : hasVersion(p) ? `<span class="pver">${esc(p.version)}</span>` : '<span class="pver unk">Version unknown</span>';
+    const wpSlug = p.wpOrgSlug || p.slug;
+    return `<li class="pl" data-slug="${esc(p.slug)}">
+      <button class="pl-main" type="button" aria-expanded="false">
+        <span class="pico" aria-hidden="true">${esc(monogram(pluginName(p)))}</span>
+        <span class="ptext"><span class="pname">${esc(pluginName(p))}</span><span class="pmeta">${esc(p.category || 'Plugin')} · ${esc(SOURCE_LABEL[p.sourceTag] || p.sourceTag || 'Detected')}${(() => { const i = report && pluginIssue(p); return i ? ` · <span class="pflag ${i.cls}">${esc(i.short)}</span>` : ''; })()}</span></span>
+        ${ver}
+      </button>
+      <div class="reveal"><div><div class="pdetail">
+        ${p.evidence ? `<div class="evid">${esc(p.evidence)}</div>` : ''}
+        ${p.method ? `<div class="method">Found in ${esc(methodLabel(p.method))}</div>` : ''}
+        ${p.health && healthTrusted(p) ? `<div class="method phealth">${esc(healthLine(p))}</div>` : ''}
+        <div class="inline-actions">
+          <button class="btn sm" type="button" data-open="https://wordpress.org/plugins/${encodeURIComponent(wpSlug)}/">${ICON.ext}WordPress.org</button>
+          <button class="btn sm" type="button" data-copy="${esc(p.slug)}" data-copy-msg="Slug copied: ${esc(p.slug)}">${ICON.copy}Copy slug</button>
+        </div>
+      </div></div></div>
+    </li>`;
+  }
+
+  // Swap in real icons and official names once they resolve.
+  function hydratePlugins(container) {
+    container.querySelectorAll('.pl[data-slug]').forEach((li) => {
+      const slug = li.dataset.slug;
+      const p = report && report.plugins.find((x) => x.slug === slug);
+      resolvePluginIcon(slug).then((url) => {
+        if (!url || !li.isConnected) return;
+        const box = li.querySelector('.pico');
+        if (box.querySelector('img')) return;
+        const img = new Image();
+        img.alt = '';
+        img.onload = () => box.appendChild(img);
+        img.src = url;
+      });
+      fetchPluginMeta(slug).then((meta) => {
+        if (!meta || !p) return;
+        if (meta.name && !p.displayName) p.displayName = meta.name;
+        if (meta.wpOrgSlug) p.wpOrgSlug = meta.wpOrgSlug;
+        if (!li.isConnected) return;
+        const nameEl = li.querySelector('.pname');
+        if (nameEl) nameEl.textContent = pluginName(p);
+        const link = li.querySelector('[data-open*="wordpress.org/plugins/"]');
+        if (link && meta.wpOrgSlug) link.dataset.open = `https://wordpress.org/plugins/${encodeURIComponent(meta.wpOrgSlug)}/`;
+      });
+    });
+  }
+
+  // ------------------------------------------------------------------ view switching
+  const PANES = ['overview', 'plugins', 'hosting', 'checks', 'evidence'];
+
+  function showState(name) {
+    $('state-loading').hidden = name !== 'loading';
+    $('state-empty').hidden = name !== 'empty';
+    $('pane-settings').hidden = true;
+    $('tabs').hidden = name !== 'report';
+    PANES.forEach((k) => { $('pane-' + k).hidden = true; });
+    const ready = name === 'report';
+    $('copy-btn').disabled = !ready;
+    document.querySelectorAll('#menu [data-action="copy-plugins"], #menu [data-action="export-json"]').forEach((b) => { b.disabled = !ready; });
+    $('rescan-btn').classList.toggle('spinning', name === 'loading');
+    $('rescan-btn').disabled = name === 'loading';
+  }
+
+  function selectTab(key, focus) {
+    if (!PANES.includes(key)) key = 'overview';
+    document.querySelectorAll('.pp-tab').forEach((t) => {
+      const on = t.dataset.tab === key;
+      t.setAttribute('aria-selected', String(on));
+      t.tabIndex = on ? 0 : -1;
+      if (on && focus) t.focus();
+    });
+    PANES.forEach((k) => { $('pane-' + k).hidden = k !== key; });
+    $('pane-settings').hidden = true;
+    $('body').scrollTop = 0;
+    placeInk();
+    if (key === 'plugins' && focus === 'search') setTimeout(() => $('plugin-search').focus(), 30);
+  }
+
+  function placeInk() {
+    const t = document.querySelector('.pp-tab[aria-selected="true"]');
+    const ink = $('tab-ink');
+    if (!t || $('tabs').hidden) return;
+    ink.style.width = `${t.offsetWidth - 16}px`;
+    ink.style.transform = `translateX(${t.offsetLeft + 8}px)`;
+  }
+
+  function setSiteIcon(src, label, muted) {
+    const box = $('site-ico'), img = $('site-favicon');
+    $('site-mono').textContent = (String(label || '?').replace(/^www\./, '').match(/[\p{L}\p{N}]/u) || ['?'])[0].toUpperCase();
+    box.classList.toggle('muted', !!muted);
+    box.classList.remove('has-img');
+    img.hidden = true;
+    if (!src) return;
+    const token = (setSiteIcon.token = (setSiteIcon.token || 0) + 1);
+    popupLoaded.then(() => { if (token === setSiteIcon.token) img.src = src; });
+    img.onload = () => { if (img.naturalWidth > 1) { img.hidden = false; box.classList.add('has-img'); } };
+    img.onerror = () => { img.hidden = true; box.classList.remove('has-img'); };
+  }
+
+  function faviconFor(tab, data) {
+    if (tab && tab.favIconUrl && !tab.favIconUrl.startsWith('chrome')) return tab.favIconUrl;
+    if (data && data.faviconUrl) return data.faviconUrl;
+    return null;
+  }
+
+  // ------------------------------------------------------------------ render: loading / empty
+  function renderLoading(tab) {
+    const host = tab ? hostOf(tab.url) : '';
+    $('site-name').textContent = host || 'Scanning…';
+    $('site-sub').innerHTML = '<span class="sk" style="width:150px;height:9px"></span>';
+    setSiteIcon(faviconFor(tab), host || 'W', true);
+    $('foot-when').textContent = 'Reading page signals and REST API…';
+    showState('loading');
+  }
+
+  function renderEmpty(kind, tab, message) {
+    const host = tab ? hostOf(tab.url) : '';
+    const internal = kind === 'internal';
+    $('site-name').textContent = internal ? (tab && tab.title) || 'Browser page' : host || 'This page';
+    $('site-sub').innerHTML = `<span class="dot off"></span>${internal ? 'Browser page' : kind === 'error' ? 'Scan incomplete' : 'Not WordPress'}`;
+    setSiteIcon(internal ? null : faviconFor(tab), internal ? 'C' : host || '?', true);
+
+    const copy = {
+      nowp: ['This site doesn’t look like WordPress', 'None of the seven signals matched. Sites with a headless front end or a strict firewall can hide WordPress, so try rescanning once the page has fully loaded.'],
+      internal: ['Browser pages can’t be scanned', 'Chrome doesn’t let extensions read chrome:// pages, the Web Store, or other built-in pages. Open a website and click WPScout again.'],
+      error: ['The scan didn’t finish', message || 'The page didn’t answer in time. Reload it, then rescan.'],
+      reload: ['Reload this tab to scan it', 'This tab was open before WPScout was installed or updated, so Chrome hasn’t given WPScout access to it yet. Reloading the page fixes that.']
+    }[kind];
+    $('empty-title').textContent = copy[0];
+    $('empty-desc').textContent = copy[1];
+    $('empty-checked').hidden = kind !== 'nowp';
+    $('empty-rescan').hidden = internal || kind === 'reload';
+    $('empty-reload').hidden = kind !== 'reload';
+    $('rescan-btn').disabled = internal;
+    $('foot-when').textContent = internal ? 'Nothing to scan on this page' : 'Last scan found no WordPress signals';
+    if (kind === 'error' || kind === 'reload') $('foot-when').textContent = 'Scan incomplete';
+    showState('empty');
+    if (internal) $('rescan-btn').disabled = true;
+  }
+
+  // ------------------------------------------------------------------ render: report
+  function renderReport(data, opts = {}) {
+    report = data;
+    const host = hostOf(data.url);
+    $('site-name').textContent = host;
+    $('site-name').title = data.url;
+    renderSiteSub();
+    setSiteIcon(faviconFor(currentTab, data), host, false);
+
+    $('tab-plugins-count').textContent = data.plugins.length || '';
+    $('tab-evidence-count').textContent = `${data.signalScore || 0}/7`;
+
+    updatesPending = true;
+    renderOverview();
+    renderPlugins();
+    renderHosting();
+    renderChecks();
+    renderEvidence();
+    vuln = { loaded: false, status: null, results: {} };
+    checkUpdates().then(runVulnLookup);
+
+    const pending = !known(data.ip) && data.ip !== 'Unknown';
+    $('foot-when').textContent = pending ? 'Looking up DNS and host…' : fromCache ? 'Cached result for this tab' : 'Scanned just now';
+    showState('report');
+    selectTab(opts.tab || 'overview');
+  }
+
+  function themeInfo() {
+    const d = report;
+    return {
+      slug: d.theme,
+      name: d.themeName || d._wpTheme?.name || formatThemeName(d.theme),
+      version: d.themeVersion || d._wpTheme?.version || '',
+      author: d.themeAuthor || d._wpTheme?.author || '',
+      listed: d._wpTheme === undefined ? null : !!d._wpTheme,
+      child: !!d.isChildTheme,
+      parent: d.parentTheme || ''
+    };
+  }
+
+  // The theme's own header file. (themeStylesheet from the scan is just the first theme
+  // asset the page loaded, which can be an image or a bundled CSS file.)
+  function styleCssUrl() {
+    const origin = report.origin || new URL(report.url).origin;
+    return `${origin}/wp-content/themes/${encodeURIComponent(report.theme)}/style.css`;
+  }
+
+  function renderOverview() {
+    const d = report;
+    const rows = [];
+    const t = themeInfo();
+
+    if (known(d.theme)) {
+      const tag = t.child ? `<span class="tag">Parent theme: ${esc(formatThemeName(t.parent))}</span>`
+        : t.listed === true ? '<span class="tag">WordPress.org</span>'
+        : t.listed === false ? '<span class="tag">Custom</span>' : '';
+      rows.push(`<div class="row clickable" role="button" tabindex="0" aria-expanded="false" data-reveal>
+        <dt>Theme</dt><dd><span class="v">${esc(t.name)}</span>${themeLatest() ? verArrow(t.version, themeLatest()) : t.version ? `<span class="num">${esc(t.version)}</span>` : ''}${tag}</dd>${ICON.chev}
+      </div>
+      <div class="reveal"><div><div class="theme-card">
+        <div class="kv">
+          <span>Slug</span><span class="mono">${esc(t.slug)}</span>
+          ${t.author ? `<span>Author</span><span>${esc(t.author)}</span>` : ''}
+          ${t.child ? `<span>Parent</span><span class="mono">${esc(t.parent)}</span>` : ''}
+          <span>Stylesheet</span><span class="mono">/wp-content/themes/${esc(t.slug)}/style.css</span>
+          <span>Directory</span><span>${t.listed === true ? 'Listed on WordPress.org' : t.listed === false ? 'Not listed on WordPress.org' : 'Checking…'}</span>
+        </div>
+        <div class="inline-actions">
+          <button class="btn sm" type="button" data-action="copy-theme">${ICON.copy}Copy</button>
+          ${t.listed === true ? `<button class="btn sm" type="button" data-open="https://wordpress.org/themes/${encodeURIComponent(t.slug)}/">${ICON.ext}WordPress.org</button>` : ''}
+          <button class="btn sm" type="button" data-open="${esc(styleCssUrl())}">${ICON.ext}style.css</button>
+        </div>
+      </div></div></div>`);
+    } else {
+      rows.push('<div class="row"><dt>Theme</dt><dd><span class="aux">Not detected</span></dd><span></span></div>');
+    }
+
+    const pb = String(d.pageBuilder || '');
+    const pbMatch = pb.match(/^(.+?)\s*\((.+)\)$/);
+    rows.push(`<div class="row"><dt>Builder</dt><dd>${known(pb) && pb !== 'None Detected'
+      ? `<span class="v">${esc(pbMatch ? pbMatch[1] : pb)}</span>${pbMatch ? `<span class="aux">${esc(pbMatch[2].charAt(0) + pbMatch[2].slice(1).toLowerCase())}</span>` : ''}`
+      : '<span class="aux">None detected</span>'}</dd><span></span></div>`);
+
+    rows.push(`<div class="row clickable" role="button" tabindex="0" data-goto="hosting"><dt>Hosting</dt><dd>${hostingSummaryHTML()}</dd>${ICON.chev}</div>`);
+    rows.push(`<div class="row"><dt>Cache</dt><dd>${cacheHTML(false)}</dd><span></span></div>`);
+    rows.push(`<div class="row"><dt>PHP</dt><dd>${phpHTML()}</dd><span></span></div>`);
+    rows.push(`<div class="row"><dt>Server</dt><dd>${serverHTML()}</dd><span></span></div>`);
+    if (known(d.ecommerce)) rows.push(`<div class="row"><dt>Store</dt><dd><span class="v">${esc(d.ecommerce)}</span></dd><span></span></div>`);
+
+    rows.unshift(healthRowHTML());
+    $('stack-rows').innerHTML = rows.join('');
+
+    const list = sortedPlugins(d.plugins);
+    $('ov-plugins-h').textContent = list.length ? `Plugins · ${list.length}` : 'Plugins';
+    const ov = $('ov-plugins');
+    ov.innerHTML = list.length
+      ? list.slice(0, 5).map(pluginRowHTML).join('')
+      : '<li class="empty-list">No plugins exposed their assets on this page.</li>';
+    ov.parentElement.querySelector('[data-goto="plugins"]').hidden = list.length <= 5;
+    hydratePlugins(ov);
+  }
+
+  function hostingSummaryHTML() {
+    const d = report;
+    if (known(d.hostingPlatform)) return `<span class="v">${esc(d.hostingPlatform)}</span>`;
+    if (known(d.proxyCDN)) return `<span class="v">${esc(d.proxyCDN)}</span>`;
+    if (known(d.isp)) return `<span class="v">${esc(d.isp)}</span>`;
+    if (d.isp === undefined) return '<span class="sk" style="width:120px"></span>';
+    return '<span class="aux">Not identified</span>';
+  }
+  function cacheHTML(full) {
+    const d = report;
+    const status = d.cacheHeaderStatus, system = d.cacheSystem;
+    if (!known(status) && !known(system)) return '<span class="aux">Not detected</span>';
+    const cls = status === 'HIT' ? 'ok' : (status === 'BYPASS' || status === 'MISS' || status === 'EXPIRED') ? 'warn' : '';
+    const label = known(status) ? status : 'Active';
+    const aux = full && d.cacheDetail ? `<span class="num">${esc(d.cacheDetail)}</span>` : known(system) ? `<span class="aux">${esc(system)}</span>` : '';
+    return `<span class="tag ${cls}">${esc(label)}</span>${aux}`;
+  }
+  function phpHTML() {
+    const v = report.phpVersion;
+    return known(v) ? `<span class="num strong">${esc(v.replace(/^PHP\//i, ''))}</span>` : '<span class="aux">Not exposed</span>';
+  }
+  function serverHTML() {
+    const s = report.serverSoftware;
+    if (!known(s)) return '<span class="aux">Not exposed</span>';
+    const m = s.match(/^([^/\s]+)\/(\S+)$/);
+    return m ? `<span class="v">${esc(m[1])}</span><span class="num">${esc(m[2])}</span>` : `<span class="v">${esc(s)}</span>`;
+  }
+
+  function renderPlugins() {
+    const d = report;
+    const cats = {};
+    d.plugins.forEach((p) => { const c = p.category || 'Plugin'; cats[c] = (cats[c] || 0) + 1; });
+    const outdated = d.plugins.filter((p) => p.latest).length;
+    const catList = [['All', d.plugins.length], ...(outdated ? [['Outdated', outdated]] : []), ...Object.entries(cats).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))];
+    if (!catList.some(([c]) => c === activeCat)) activeCat = 'All';
+    $('chips').innerHTML = catList.length > 2 || outdated
+      ? catList.map(([c, n]) => `<button class="chip${c === 'Outdated' ? ' chip-warn' : ''}" type="button" data-cat="${esc(c)}" aria-pressed="${c === activeCat}">${esc(c)}<span class="c">${n}</span></button>`).join('')
+      : '';
+    $('plugin-search').placeholder = `Search ${d.plugins.length} plugin${d.plugins.length === 1 ? '' : 's'}`;
+    renderPluginList();
+  }
+
+  function renderPluginList() {
+    const d = report;
+    const term = $('plugin-search').value.trim().toLowerCase();
+    const match = (p) => (activeCat === 'All' || (activeCat === 'Outdated' ? !!p.latest : (p.category || 'Plugin') === activeCat))
+      && (!term || pluginName(p).toLowerCase().includes(term) || p.slug.toLowerCase().includes(term) || (p.category || '').toLowerCase().includes(term));
+    const all = sortedPlugins(d.plugins).filter(match);
+    const withVer = all.filter(hasVersion), noVer = all.filter((p) => !hasVersion(p));
+    const el = $('plugins-list');
+
+    if (!d.plugins.length) {
+      el.innerHTML = '<div class="empty-list">No plugins exposed their assets on this page.<br>Some sites bundle or hide plugin files.</div>';
+      return;
+    }
+    if (!all.length) {
+      el.innerHTML = `<div class="empty-list">No plugins match “${esc($('plugin-search').value)}”.<button class="link" type="button" data-action="clear-search">Clear search</button></div>`;
+      return;
+    }
+    el.innerHTML =
+      (withVer.length ? `<ul class="plist">${withVer.map(pluginRowHTML).join('')}</ul>` : '') +
+      (noVer.length ? `<div class="subh"><span>Version unknown</span><span>${noVer.length}</span></div><ul class="plist">${noVer.map(pluginRowHTML).join('')}</ul>` : '');
+    hydratePlugins(el);
+  }
+
+  function renderHosting() {
+    const d = report;
+    const pending = d.ip === undefined || d.isp === undefined;
+    const sk = (w) => `<span class="sk" style="width:${w}px"></span>`;
+    const val = (v, fallback = 'Unknown') => known(v) ? `<span class="v">${esc(v)}</span>` : `<span class="aux">${fallback}</span>`;
+    const https = (d.protocol || (d.url || '').slice(0, 6)).startsWith('https');
+    const ns = known(d.dns) ? d.dns.split(/,\s*/) : [];
+
+    $('pane-hosting').innerHTML = `
+      <div class="grp">
+        <div class="grp-h"><h2>Host</h2></div>
+        <dl class="rows">
+          <div class="row"><dt>Platform</dt><dd>${known(d.hostingPlatform) ? val(d.hostingPlatform) : '<span class="aux">Not identified</span>'}</dd><span></span></div>
+          <div class="row"><dt>Network</dt><dd>${pending ? sk(110) : val(d.isp)}</dd><span></span></div>
+          <div class="row"><dt>Location</dt><dd>${pending ? sk(150) : val(stripFlag(d.location))}</dd><span></span></div>
+        </dl>
+      </div>
+      <div class="grp">
+        <div class="grp-h"><h2>Server</h2></div>
+        <dl class="rows">
+          <div class="row"><dt>Web server</dt><dd>${serverHTML()}</dd><span></span></div>
+          <div class="row"><dt>PHP</dt><dd>${phpHTML()}</dd><span></span></div>
+          <div class="row"><dt>CDN / edge</dt><dd>${val(d.proxyCDN, 'None detected')}</dd><span></span></div>
+          <div class="row"><dt>Page cache</dt><dd>${cacheHTML(true)}</dd><span></span></div>
+          <div class="row"><dt>HTTPS</dt><dd>${https ? `<span class="tag ok">${ICON.lock}Secure</span>` : '<span class="tag warn">Not secure</span>'}</dd><span></span></div>
+        </dl>
+      </div>
+      <div class="grp">
+        <div class="grp-h"><h2>DNS</h2></div>
+        <dl class="rows">
+          <div class="row"><dt>IPv4</dt><dd>${pending ? sk(100) : known(d.ip) ? `<span class="num strong">${esc(d.ip)}</span>` : '<span class="aux">Unknown</span>'}</dd>${known(d.ip) ? `<button class="copy" type="button" aria-label="Copy IP address" data-copy="${esc(d.ip)}" data-copy-msg="IP address copied">${ICON.copy}</button>` : '<span></span>'}</div>
+          <div class="row"><dt>Nameservers</dt><dd>${pending ? sk(130) : ns.length ? `<span class="stack">${ns.map((n) => `<span class="num strong">${esc(n)}</span>`).join('')}</span>` : '<span class="aux">Unknown</span>'}</dd>${ns.length ? `<button class="copy" type="button" aria-label="Copy nameservers" data-copy="${esc(ns.join('\n'))}" data-copy-msg="Nameservers copied">${ICON.copy}</button>` : '<span></span>'}</div>
+        </dl>
+      </div>${contentHTML()}${techHTML()}`;
+  }
+
+  const SIGNALS = [
+    ['api', 'REST API responds', 'REST API'],
+    ['linkHeader', 'REST API in Link header', 'HTTP header'],
+    ['generator', 'Generator meta tag', 'Page source'],
+    ['wpContent', '/wp-content/ assets', 'Asset URLs'],
+    ['wpIncludes', '/wp-includes/ assets', 'Asset URLs'],
+    ['linkRel', 'REST API link element', 'Page source'],
+    ['adminPaths', 'Login or admin path', 'Page source']
   ];
+  function signalSummary(key, sig) {
+    const det = String(sig.detail || '');
+    if (key === 'api') { const m = det.match(/\((\d+) namespaces\)/); return m ? `/wp-json lists ${m[1]} namespaces` : '/wp-json responds'; }
+    if (key === 'generator') { const m = det.match(/WordPress\s+([\d.]+)/i); return m ? `WordPress ${m[1]}` : det.startsWith('RSS') ? 'Found in RSS feed link' : 'WordPress generator tag'; }
+    if (key === 'wpContent' || key === 'wpIncludes') return sig.count ? `${sig.count} asset${sig.count === 1 ? '' : 's'} loaded` : 'Assets loaded';
+    if (key === 'linkHeader') return 'rel="https://api.w.org/"';
+    if (key === 'linkRel') return det.includes('EditURI') ? 'RSD EditURI link' : '<link rel="https://api.w.org/">';
+    if (key === 'adminPaths') return /logged in|wpadminbar/i.test(det) ? 'Admin bar present (you’re logged in)' : 'Login link on the page';
+    return det;
+  }
 
-  const abortCtrl = new AbortController();
-  try {
-    let response;
+  function renderEvidence() {
+    const d = report;
+    const sigs = SIGNALS.map(([k, t, src]) => ({ k, t, src, s: (d.signals && d.signals[k]) || { detected: false } }));
+    const matched = sigs.filter((x) => x.s.detected).length;
+    $('pane-evidence').innerHTML = `
+      <div class="verdict">
+        <div class="line"><span class="big">${matched} of 7 signals matched</span><span class="conf">${esc(d.confidence || '')} confidence</span></div>
+        <div class="segs" aria-hidden="true">${sigs.map((x) => `<i class="${x.s.detected ? 'on' : ''}"></i>`).join('')}</div>
+      </div>
+      <ul class="plist">${sigs.map((x) => `
+        <li class="sig">
+          <button class="sig-main" type="button" aria-expanded="false" ${x.s.detected ? '' : 'disabled'}>
+            ${x.s.detected ? ICON.check : ICON.miss}
+            <span style="min-width:0"><span class="sig-t">${esc(x.t)}</span><span class="sig-s">${esc(x.s.detected ? signalSummary(x.k, x.s) : 'Not found on this page')}</span></span>
+            <span class="sig-src">${esc(x.src)}</span>
+          </button>
+          ${x.s.detected ? `<div class="reveal"><div><div class="pdetail"><div class="evid">${esc(x.s.detail)}</div></div></div></div>` : ''}
+        </li>`).join('')}
+      </ul>`;
+  }
+
+  // Enrich theme from the site's style.css (already done in content script) and WordPress.org.
+  function enrichTheme() {
+    const d = report;
+    if (!known(d.theme)) return;
+    const theme = d.theme;
+    fetchThemeMeta(theme).then((meta) => {
+      if (!report || report.theme !== theme) return;
+      report._wpTheme = meta || null;
+      refreshHealthViews();
+    });
+  }
+
+  // ------------------------------------------------------------------ updates, security, SEO, tech stack
+  // Compare dotted versions: 5.9.5 < 6.2.5; 6.4 == 6.4.0; a pre-release (7.2-RC1) sorts before 7.2.
+  function compareVersions(a, b) {
+    const parse = (v) => {
+      const m = String(v || '').trim().match(/^(\d+(?:\.\d+)*)(.*)$/);
+      return m ? { nums: m[1].split('.').map((n) => parseInt(n, 10) || 0), pre: /^[-.]?(alpha|beta|rc|dev|pre)/i.test(m[2]) } : { nums: [0], pre: false };
+    };
+    const x = parse(a), y = parse(b);
+    for (let i = 0; i < Math.max(x.nums.length, y.nums.length); i++) {
+      const d = (x.nums[i] || 0) - (y.nums[i] || 0);
+      if (d) return d < 0 ? -1 : 1;
+    }
+    if (x.pre !== y.pre) return x.pre ? -1 : 1;
+    return 0;
+  }
+  const isBehind = (current, latest) => !!(current && latest && compareVersions(current, latest) < 0);
+
+  // Latest WordPress release, cached for 12 hours in session storage.
+  async function fetchCoreLatest() {
+    const KEY = 'wp_core_latest';
     try {
-      // Use GET with AbortController so PHP/WordPress caching plugins (WP-Optimize, etc.)
-      // see a genuine GET request and return their real cache status ('cached')
-      // instead of bypassing with 'not cached' as they do on HEAD requests!
-      response = await fetch(document.location.href, {
-        method: 'GET',
-        signal: abortCtrl.signal
-      });
-    } catch (e) {
-      // Fallback to HEAD if GET is blocked or fails
-      response = await fetch(document.location.href, { method: 'HEAD' });
-    }
-    
-    // Server & Proxy Logic
-    const rawServer = response.headers.get('server');
-    if (rawServer) {
-      if (rawServer.toLowerCase().includes('cloudflare')) {
-        proxyCDN = 'Cloudflare';
-      } else if (rawServer.toLowerCase().includes('sucuri')) {
-        proxyCDN = 'Sucuri';
-      } else {
-        serverSoftware = rawServer;
+      if (hasChrome && chrome.storage && chrome.storage.session) {
+        const hit = (await chrome.storage.session.get(KEY))[KEY];
+        if (hit && Date.now() - hit.t < 12 * 3600 * 1000) return hit.v;
       }
-    }
-    
-    // PHP Version
-    const poweredBy = response.headers.get('x-powered-by');
-    if (poweredBy && poweredBy.toLowerCase().includes('php')) {
-      phpVersion = poweredBy;
-    }
-
-    // Host Overrides (from headers)
-    if (response.headers.has('x-wpengine')) proxyCDN = 'WP Engine (Platform)';
-    if (response.headers.has('x-kinsta-cache')) proxyCDN = 'Kinsta (Platform)';
-    if (response.headers.has('x-pantheon-styx-edge-cache')) proxyCDN = 'Pantheon (Platform)';
-
-    // Cache Header Detection - Step 1: Check known priority headers
-    for (const rule of knownCacheRules) {
-      if (response.headers.has(rule.header)) {
-        cacheSystem = rule.system;
-        const rawVal = response.headers.get(rule.header);
-        cacheHeaderStatus = parseCacheStatus(rawVal);
-        let detail = `${rule.header}: ${rawVal}`;
-        if (rule.header === 'wpo-cache-status' && response.headers.has('wpo-cache-message')) {
-          detail += ` (${response.headers.get('wpo-cache-message')})`;
-        }
-        cacheDetail = detail;
-
-        // Auto-register detected caching plugin if not in pluginsMap
-        if (rule.pluginSlug && !pluginsMap.has(rule.pluginSlug)) {
-          pluginsMap.set(rule.pluginSlug, {
-            slug: rule.pluginSlug,
-            version: '',
-            method: 'HTTP Cache Header',
-            evidence: detail
-          });
-        }
-        break;
-      }
-    }
-
-    // Cache Header Detection - Step 2: Dynamic wildcard scan of all response headers
-    if (cacheSystem === 'None Detected') {
-      response.headers.forEach((val, key) => {
-        if (cacheSystem !== 'None Detected') return;
-        const lKey = key.toLowerCase();
-        if (lKey.includes('cache-status') || (lKey.includes('cache') && !lKey.includes('cache-control'))) {
-          cacheSystem = key;
-          cacheHeaderStatus = parseCacheStatus(val);
-          cacheDetail = `${key}: ${val}`;
-        }
-      });
-    }
-
-    // Cache Header Detection - Step 3: RFC 7234 standard Age header
-    if (cacheSystem === 'None Detected' && response.headers.has('age')) {
-      const ageVal = parseInt(response.headers.get('age'), 10);
-      if (!isNaN(ageVal) && ageVal > 0) {
-        cacheSystem = 'Proxy Cache (Age)';
-        cacheHeaderStatus = 'HIT';
-        cacheDetail = `Age: ${ageVal}s`;
-      }
-    }
-
-    // Cancel body stream now that headers have been inspected
-    abortCtrl.abort();
-
-  } catch (e) {
-    // CORS or Network error
+      const res = await fetchWithTimeout('https://api.wordpress.org/core/version-check/1.7/', { cache: 'no-store' }, 5000);
+      const data = await res.json();
+      const v = data && data.offers && data.offers[0] && data.offers[0].current;
+      if (v && hasChrome && chrome.storage && chrome.storage.session) chrome.storage.session.set({ [KEY]: { v, t: Date.now() } }).catch(() => {});
+      return v || '';
+    } catch (e) { return ''; }
   }
 
-  // Cache Detection - Step 4: DOM HTML Comment Inspection (Fallback & Active Tab Verification)
-  // If headers were missing OR if headers reported BYPASS, check if the current active tab HTML
-  // was actually delivered from cache via plugin HTML comment signatures!
-  if (cacheSystem === 'None Detected' || cacheHeaderStatus === 'Unknown' || cacheHeaderStatus === 'BYPASS') {
+  // Work out which detected versions are behind WordPress.org. Plugin data comes from the
+  // same plugin_information lookups that already load names and icons (no extra requests).
+  let updatesPending = true;
+  async function checkUpdates() {
+    const r = report;
+    updatesPending = true;
+    const [metas, core] = await Promise.all([
+      Promise.all(r.plugins.map((p) => fetchPluginMeta(p.slug).then((m) => [p, m]).catch(() => [p, null]))),
+      known(r.version) ? fetchCoreLatest() : Promise.resolve('')
+    ]);
+    if (report !== r) return;
+    for (const [p, m] of metas) {
+      if (m && !m.isPro && m.latest && hasVersion(p) && isBehind(p.version, m.latest)) p.latest = m.latest;
+      else delete p.latest;
+      if (m && m.health) p.health = m.health; else delete p.health;
+    }
+    r._coreLatest = core || '';
+    updatesPending = false;
+    refreshHealthViews();
+  }
+
+  function themeLatest() {
+    const t = themeInfo();
+    return t.listed === true && !t.child && isBehind(t.version, report._wpTheme && report._wpTheme.version) ? report._wpTheme.version : '';
+  }
+  const coreOutdated = () => isBehind(report.version, report._coreLatest);
+  const outdatedPlugins = () => report.plugins.filter((p) => p.latest);
+  const updateCount = () => outdatedPlugins().length + (coreOutdated() ? 1 : 0) + (themeLatest() ? 1 : 0);
+
+  // ---- Plugin health: closed, stale, or not tested with the site's WordPress version
+  const majorMinor = (v) => (String(v || '').match(/^(\d+)\.(\d+)/) || []).slice(1, 3).join('.');
+  function monthsSince(dateStr) {
+    const t = Date.parse(dateStr);
+    return Number.isFinite(t) ? (Date.now() - t) / (30.44 * 86400000) : null;
+  }
+  function relativeAge(dateStr) {
+    const m = monthsSince(dateStr);
+    if (m === null) return '';
+    if (m < 1) return 'this month';
+    if (m < 12) return `${Math.round(m)} month${Math.round(m) === 1 ? '' : 's'} ago`;
+    const y = Math.floor(m / 12);
+    return `${y} year${y === 1 ? '' : 's'} ago`;
+  }
+  const fmtInstalls = (n) => !n ? '' : n >= 1e6 ? `${Math.floor(n / 1e6)}M+ installs` : n >= 1e3 ? `${Math.floor(n / 1e3)}K+ installs` : `${n}+ installs`;
+  // A REST namespace isn't always the plugin's WordPress.org slug (Jetpack registers "videopress/v1",
+  // but the "videopress" slug is an unrelated, closed plugin), so only judge plugins found in asset URLs.
+  const healthTrusted = (p) => p.method !== 'REST API Namespace';
+  function pluginIssue(p) {
+    const h = p.health;
+    if (!h || !healthTrusted(p)) return null;
+    if (h.closed) return { cls: 'bad', short: 'Closed', text: `Closed on WordPress.org${h.closedDate ? ` (${h.closedDate})` : ''}${h.closedReason ? `: ${h.closedReason}` : ''}` };
+    const age = monthsSince(h.lastUpdated);
+    if (age !== null && age >= 24) return { cls: 'warn', short: 'Stale', text: `No update in ${Math.floor(age / 12)} years (last ${h.lastUpdated})` };
+    // Same rule WordPress.org uses: warn when "tested up to" is older than the last 3 major releases.
+    const site = majorMinor(report.version), tested = majorMinor(h.tested);
+    const majors = (v) => { const [a, b] = v.split('.').map(Number); return a * 10 + b; };
+    if (site && tested && majors(site) - majors(tested) >= 3) return { cls: 'warn', short: 'Untested', text: `Tested up to WordPress ${h.tested}; the site runs ${site}` };
+    return null;
+  }
+  const pluginIssues = () => report.plugins.map((p) => [p, pluginIssue(p)]).filter(([, i]) => i);
+  function healthLine(p) {
+    const h = p.health;
+    if (!h || !healthTrusted(p)) return '';
+    if (h.closed) return `Closed on WordPress.org${h.closedDate ? ` on ${h.closedDate}` : ''}${h.closedReason ? ` · ${h.closedReason}` : ''}`;
+    return [h.lastUpdated && `Updated ${relativeAge(h.lastUpdated)}`, h.tested && `Tested up to ${h.tested}`, fmtInstalls(h.activeInstalls),
+      h.numRatings ? `★ ${(h.rating / 20).toFixed(1)} (${h.numRatings.toLocaleString()})` : ''].filter(Boolean).join(' · ');
+  }
+
+  const tagHTML = (cls, label) => `<span class="tag ${cls}">${esc(label)}</span>`;
+  const verArrow = (from, to) => `<span class="pver upd"><span class="was">${esc(from)}</span><span class="arr">→</span>${esc(to)}</span>`;
+
+  // Security rows: response headers from the scan, plus the popup-time deep checks.
+  // PHP branch support dates (php.net/supported-versions). Branches not listed are older and end-of-life.
+  const PHP_SUPPORT = { '8.5': '2029-12-31', '8.4': '2028-12-31', '8.3': '2027-12-31', '8.2': '2026-12-31', '8.1': '2025-12-31', '8.0': '2023-11-26', '7.4': '2022-11-28' };
+  function phpItem() {
+    const raw = String(report.phpVersion || '');
+    const m = raw.match(/(\d+)\.(\d+)(?:\.(\d+))?/);
+    if (!m) return null;
+    const branch = `${m[1]}.${m[2]}`, full = m[0];
+    const until = PHP_SUPPORT[branch];
+    if (!until && Number(m[1]) >= 9) return { label: 'PHP', cls: 'ok', tag: 'Supported', note: `PHP ${full}` };
+    if (!until || Date.parse(until) < Date.now()) return { label: 'PHP', cls: 'bad', tag: 'End of life', note: `PHP ${full} no longer gets security fixes${until ? ` (since ${until})` : ''}` };
+    const monthsLeft = (Date.parse(until) - Date.now()) / (30.44 * 86400000);
+    return monthsLeft < 6 ? { label: 'PHP', cls: 'warn', tag: 'Ending soon', note: `PHP ${full} security support ends ${until}` }
+      : { label: 'PHP', cls: 'ok', tag: 'Supported', note: `PHP ${full}, security fixes until ${until}` };
+  }
+  // How many WordPress major releases (x.y) the site is behind the latest.
+  function coreMajorsBehind() {
+    const a = String(report.version || '').match(/^(\d+)\.(\d+)/), b = String(report._coreLatest || '').match(/^(\d+)\.(\d+)/);
+    if (!a || !b) return 0;
+    return (Number(b[1]) * 10 + Number(b[2])) - (Number(a[1]) * 10 + Number(a[2]));
+  }
+
+  function securityItems() {
+    const d = report, h = d.securityHeaders, k = d.deep, items = [];
+    const https = (d.protocol || (d.url || '').slice(0, 6)).startsWith('https');
+    const php = phpItem();
+    if (php) items.push(php);
+    if (k && k.error) items.push({ label: 'Site checks', cls: '', tag: 'Couldn’t run', note: 'Reload this tab, then open WPScout again.' });
+    else if (k) {
+      items.push(k.xmlrpc.enabled ? { label: 'XML-RPC', cls: 'warn', tag: 'Enabled', note: '/xmlrpc.php accepts requests' } : { label: 'XML-RPC', cls: 'ok', tag: 'Off', note: `/xmlrpc.php answered ${k.xmlrpc.status || 'nothing'}` });
+      items.push(k.users.exposed ? { label: 'Usernames', cls: 'warn', tag: `${k.users.list.length} exposed`, note: k.users.list.join(', ') } : { label: 'Usernames', cls: 'ok', tag: 'Hidden', note: 'REST API doesn’t list users' });
+      items.push(k.readme.exposed ? { label: 'readme.html', cls: 'warn', tag: 'Public', note: k.readme.version ? `Shows version ${k.readme.version}` : 'Shows the WordPress readme' } : { label: 'readme.html', cls: 'ok', tag: 'Hidden', note: '' });
+      items.push(k.uploadsListing.exposed ? { label: 'Uploads', cls: 'warn', tag: 'Listing on', note: '/wp-content/uploads/ lists files' } : { label: 'Uploads', cls: 'ok', tag: 'Listing off', note: '' });
+      items.push(k.debugLog.exposed ? { label: 'debug.log', cls: 'bad', tag: 'Exposed', note: '/wp-content/debug.log is public' } : { label: 'debug.log', cls: 'ok', tag: 'Not public', note: '' });
+    } else {
+      items.push({ pending: true }, { pending: true }, { pending: true });
+    }
+    if (!h) items.push({ label: 'Headers', cls: '', tag: 'Not checked', note: 'The page headers couldn’t be read' });
+    else {
+      const has = (n) => !!h[n];
+      const frameOk = has('x-frame-options') || /frame-ancestors/i.test(h['content-security-policy'] || '');
+      if (https) items.push(has('strict-transport-security') ? { label: 'HSTS', cls: 'ok', tag: 'Set', note: h['strict-transport-security'] } : { label: 'HSTS', cls: 'warn', tag: 'Missing', note: 'Strict-Transport-Security' });
+      items.push(has('content-security-policy') ? { label: 'CSP', cls: 'ok', tag: 'Set', note: h['content-security-policy'] } : { label: 'CSP', cls: 'warn', tag: 'Missing', note: 'Content-Security-Policy' });
+      items.push(frameOk ? { label: 'Framing', cls: 'ok', tag: 'Protected', note: h['x-frame-options'] || 'CSP frame-ancestors' } : { label: 'Framing', cls: 'warn', tag: 'Missing', note: 'X-Frame-Options' });
+      items.push(/nosniff/i.test(h['x-content-type-options'] || '') ? { label: 'MIME sniffing', cls: 'ok', tag: 'Blocked', note: 'nosniff' } : { label: 'MIME sniffing', cls: 'warn', tag: 'Missing', note: 'X-Content-Type-Options' });
+      items.push(has('referrer-policy') ? { label: 'Referrer', cls: 'ok', tag: 'Set', note: h['referrer-policy'] } : { label: 'Referrer', cls: '', tag: 'Not set', note: 'Referrer-Policy' });
+      items.push(has('permissions-policy') ? { label: 'Permissions', cls: 'ok', tag: 'Set', note: h['permissions-policy'] } : { label: 'Permissions', cls: '', tag: 'Not set', note: 'Permissions-Policy' });
+    }
+    return items;
+  }
+
+  function seoItems() {
+    const s = report.seo, k = report.deep, items = [];
+    if (!s) return [{ label: 'SEO', cls: '', tag: 'Not read', note: 'Rescan to read this page’s metadata' }];
+    const len = (x) => [...(x || '')].length;
+    items.push(!s.title ? { label: 'Title', cls: 'warn', tag: 'Missing', note: '' } : { label: 'Title', cls: len(s.title) > 60 ? 'warn' : 'ok', tag: `${len(s.title)} chars`, note: s.title });
+    items.push(!s.description ? { label: 'Description', cls: 'warn', tag: 'Missing', note: 'No meta description' } : { label: 'Description', cls: len(s.description) > 160 ? 'warn' : 'ok', tag: `${len(s.description)} chars`, note: s.description });
+    items.push(s.canonical ? { label: 'Canonical', cls: 'ok', tag: 'Set', note: s.canonical } : { label: 'Canonical', cls: 'warn', tag: 'Missing', note: '' });
+    const noindex = /noindex/i.test(`${s.robots} ${s.xRobots}`);
+    items.push(noindex ? { label: 'Indexing', cls: 'warn', tag: 'Noindex', note: s.robots || s.xRobots } : { label: 'Indexing', cls: 'ok', tag: 'Indexable', note: s.robots || 'No robots meta tag' });
+    items.push(s.ogTitle && s.ogImage ? { label: 'Open Graph', cls: 'ok', tag: 'Set', note: s.ogTitle } : (s.ogTitle || s.ogImage) ? { label: 'Open Graph', cls: 'warn', tag: 'Partial', note: s.ogImage ? 'No og:title' : 'No og:image' } : { label: 'Open Graph', cls: 'warn', tag: 'Missing', note: '' });
+    items.push(s.twitterCard ? { label: 'Twitter card', cls: 'ok', tag: 'Set', note: s.twitterCard } : { label: 'Twitter card', cls: '', tag: 'None', note: '' });
+    items.push(s.schema && s.schema.length ? { label: 'Schema', cls: 'ok', tag: `${s.schema.length} type${s.schema.length === 1 ? '' : 's'}`, note: s.schema.join(', ') } : { label: 'Schema', cls: '', tag: 'None', note: 'No JSON-LD found' });
+    items.push(s.lang ? { label: 'Language', cls: 'ok', tag: 'Set', note: s.lang } : { label: 'Language', cls: 'warn', tag: 'Missing', note: '<html lang> not set' });
+    items.push({ label: 'H1', cls: s.h1 === 1 ? 'ok' : '', tag: s.h1 === 1 ? 'One' : s.h1 === 0 ? 'None' : `${s.h1} headings`, note: 'On this page' });
+    if (k && !k.error) {
+      items.push(k.sitemap.found ? { label: 'Sitemap', cls: 'ok', tag: 'Found', note: k.sitemap.path } : { label: 'Sitemap', cls: 'warn', tag: 'Not found', note: 'Checked /wp-sitemap.xml, /sitemap_index.xml, /sitemap.xml' });
+      items.push(!k.robots.found ? { label: 'robots.txt', cls: '', tag: 'Not found', note: '' } : k.robots.disallowAll ? { label: 'robots.txt', cls: 'warn', tag: 'Blocks all', note: 'Disallow: / for all crawlers' } : { label: 'robots.txt', cls: 'ok', tag: 'Found', note: k.robots.sitemapLine ? 'Lists a sitemap' : 'No Sitemap line' });
+    } else if (!k) items.push({ pending: true }, { pending: true });
+    return items;
+  }
+
+  const issueCount = (items) => items.filter((i) => i.cls === 'warn' || i.cls === 'bad').length;
+
+  function checkRowHTML(i) {
+    if (i.html) return i.html;
+    if (i.wide) return `<div class="row wide"><dt><span class="v">${esc(i.label)}</span></dt><dd>${tagHTML(i.cls, i.tag)}</dd></div><div class="row note-row"><span class="aux clip" title="${esc(i.note)}">${esc(i.note)}</span></div>`;
+    if (i.pending) return '<div class="row chk"><dt><span class="sk" style="width:60px"></span></dt><dd><span class="sk" style="width:120px"></span></dd><span></span></div>';
+    return `<div class="row chk"><dt>${esc(i.label)}</dt><dd>${tagHTML(i.cls, i.tag)}${i.note ? `<span class="aux clip" title="${esc(i.note)}">${esc(i.note)}</span>` : ''}</dd><span></span></div>`;
+  }
+
+  // ---- Known vulnerabilities (optional keys for Wordfence and WPScan; lookups run in the background worker)
+  const VULN_PROVIDERS = {
+    wordfence: { label: 'Wordfence', origin: 'https://www.wordfence.com/*' },
+    wpscan: { label: 'WPScan', origin: 'https://wpscan.com/*' }
+  };
+  let vuln = { loaded: false, status: null, results: {} };
+  const provOn = (st) => !!(st && st.hasKey && st.permission);
+  function vulnQueryItems() {
+    const d = report, items = [];
+    d.plugins.forEach((p) => { if (hasVersion(p)) items.push({ type: 'plugin', slug: p.wpOrgSlug || p.slug, version: p.version, name: pluginName(p) }); });
+    const t = themeInfo();
+    if (known(d.theme) && t.version) items.push({ type: 'theme', slug: d.theme, version: t.version, name: t.name });
+    if (known(d.version)) items.push({ type: 'core', slug: 'wordpress', version: String(d.version).replace(/-\d{4,}$/, ''), name: 'WordPress' });
+    return items;
+  }
+  async function runVulnLookup() {
+    const r = report;
+    if (!hasChrome || !r) { if (!vuln.items) vuln = { loaded: true, status: null, results: {} }; if (r) refreshHealthViews(); return; }
+    const items = vulnQueryItems();
     try {
-      const commentIterator = document.createNodeIterator(
-        document,
-        NodeFilter.SHOW_COMMENT,
-        () => NodeFilter.FILTER_ACCEPT
-      );
-      let commentNode;
-      while ((commentNode = commentIterator.nextNode())) {
-        const text = (commentNode.nodeValue || '').trim();
-        if (!text) continue;
-
-        if (/cached\s+by\s+wp-optimize|wpo-cache/i.test(text)) {
-          cacheSystem = 'WP-Optimize';
-          cacheHeaderStatus = 'HIT';
-          cacheDetail = 'HTML Comment: WP-Optimize';
-          if (!pluginsMap.has('wp-optimize')) {
-            pluginsMap.set('wp-optimize', {
-              slug: 'wp-optimize',
-              version: '',
-              method: 'HTML Comment Signature',
-              evidence: text.substring(0, 80)
-            });
+      const res = await chrome.runtime.sendMessage({ type: 'VULN_LOOKUP', items });
+      if (report !== r) return;
+      const w = (res && res.wpscan) || {};
+      vuln = { loaded: true, status: res && res.status, results: { ...(res && res.results) }, items, wpscanError: w.error || '', wpscanRetryAt: w.retryAt || 0, wpscanCalls: w.calls || 0 };
+    } catch (e) { vuln = { loaded: true, status: null, results: {} }; }
+    refreshHealthViews();
+  }
+  // Combine every provider's matches: one entry per product, one hit per issue (same CVE, or same title, counts once).
+  function vulnMatches() {
+    const names = Object.fromEntries((vuln.items || []).map((i) => [`${i.type}:${i.slug}`, i.name]));
+    const by = new Map();
+    let any = false;
+    for (const [src, list] of Object.entries(vuln.results || {})) {
+      if (!Array.isArray(list)) continue;
+      any = true;
+      for (const m of list) {
+        const k = `${m.type}:${m.slug}`;
+        if (!by.has(k)) by.set(k, { type: m.type, slug: m.slug, version: m.version, name: names[k] || m.slug, hits: [], seen: new Map() });
+        const e = by.get(k);
+        for (const h of m.hits || []) {
+          const cves = Array.isArray(h.cve) ? h.cve : h.cve ? [h.cve] : [];
+          const tkey = 't:' + String(h.title || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+          const keys = [...cves.map((c) => 'c:' + c.toUpperCase()), tkey];
+          const hit = keys.map((x) => e.seen.get(x)).find(Boolean);
+          if (hit) {
+            if (!hit.sources.includes(src)) hit.sources.push(src);
+            if (h.url && !hit.links[src]) hit.links[src] = h.url;
+            if (!hit.published && h.published) hit.published = h.published;
+            if (hit.score == null && h.score != null) { hit.score = h.score; hit.rating = h.rating; }
+            if (!hit.patched.length && h.patched && h.patched.length) hit.patched = h.patched;
+            keys.forEach((x) => e.seen.set(x, hit));
+          } else {
+            const n = { title: h.title, score: h.score, rating: h.rating, cve: cves, patched: h.patched || [], sources: [src], links: h.url ? { [src]: h.url } : {}, published: h.published || '' };
+            e.hits.push(n); keys.forEach((x) => e.seen.set(x, n));
           }
-          break;
-        } else if (/wp\s*rocket/i.test(text)) {
-          cacheSystem = 'WP Rocket';
-          cacheHeaderStatus = 'Active';
-          cacheDetail = 'HTML Comment: WP Rocket';
-          if (!pluginsMap.has('wp-rocket')) {
-            pluginsMap.set('wp-rocket', {
-              slug: 'wp-rocket',
-              version: '',
-              method: 'HTML Comment Signature',
-              evidence: text.substring(0, 80)
-            });
-          }
-          break;
-        } else if (/wp\s*fastest\s*cache/i.test(text)) {
-          cacheSystem = 'WP Fastest Cache';
-          cacheHeaderStatus = 'HIT';
-          cacheDetail = 'HTML Comment: WP Fastest Cache';
-          if (!pluginsMap.has('wp-fastest-cache')) {
-            pluginsMap.set('wp-fastest-cache', {
-              slug: 'wp-fastest-cache',
-              version: '',
-              method: 'HTML Comment Signature',
-              evidence: text.substring(0, 80)
-            });
-          }
-          break;
-        } else if (/w3\s*total\s*cache/i.test(text)) {
-          cacheSystem = 'W3 Total Cache';
-          cacheHeaderStatus = 'HIT';
-          cacheDetail = 'HTML Comment: W3 Total Cache';
-          if (!pluginsMap.has('w3-total-cache')) {
-            pluginsMap.set('w3-total-cache', {
-              slug: 'w3-total-cache',
-              version: '',
-              method: 'HTML Comment Signature',
-              evidence: text.substring(0, 80)
-            });
-          }
-          break;
-        } else if (/supercache|cached\s+page\s+served\s+by\s+wp-cache/i.test(text)) {
-          cacheSystem = 'WP Super Cache';
-          cacheHeaderStatus = 'HIT';
-          cacheDetail = 'HTML Comment: WP Super Cache';
-          if (!pluginsMap.has('wp-super-cache')) {
-            pluginsMap.set('wp-super-cache', {
-              slug: 'wp-super-cache',
-              version: '',
-              method: 'HTML Comment Signature',
-              evidence: text.substring(0, 80)
-            });
-          }
-          break;
-        } else if (/litespeed\s*cache/i.test(text)) {
-          cacheSystem = 'LiteSpeed Cache';
-          cacheHeaderStatus = 'HIT';
-          cacheDetail = 'HTML Comment: LiteSpeed Cache';
-          if (!pluginsMap.has('litespeed-cache')) {
-            pluginsMap.set('litespeed-cache', {
-              slug: 'litespeed-cache',
-              version: '',
-              method: 'HTML Comment Signature',
-              evidence: text.substring(0, 80)
-            });
-          }
-          break;
-        } else if (/cache\s*enabler/i.test(text)) {
-          cacheSystem = 'Cache Enabler';
-          cacheHeaderStatus = 'HIT';
-          cacheDetail = 'HTML Comment: Cache Enabler';
-          if (!pluginsMap.has('cache-enabler')) {
-            pluginsMap.set('cache-enabler', {
-              slug: 'cache-enabler',
-              version: '',
-              method: 'HTML Comment Signature',
-              evidence: text.substring(0, 80)
-            });
-          }
-          break;
-        } else if (/hummingbird/i.test(text)) {
-          cacheSystem = 'Hummingbird';
-          cacheHeaderStatus = 'Active';
-          cacheDetail = 'HTML Comment: Hummingbird';
-          if (!pluginsMap.has('hummingbird-performance')) {
-            pluginsMap.set('hummingbird-performance', {
-              slug: 'hummingbird-performance',
-              version: '',
-              method: 'HTML Comment Signature',
-              evidence: text.substring(0, 80)
-            });
-          }
-          break;
-        } else if (/flyingpress/i.test(text)) {
-          cacheSystem = 'FlyingPress';
-          cacheHeaderStatus = 'HIT';
-          cacheDetail = 'HTML Comment: FlyingPress';
-          if (!pluginsMap.has('flying-press')) {
-            pluginsMap.set('flying-press', {
-              slug: 'flying-press',
-              version: '',
-              method: 'HTML Comment Signature',
-              evidence: text.substring(0, 80)
-            });
-          }
-          break;
-        } else if (/breeze/i.test(text)) {
-          cacheSystem = 'Breeze Cache';
-          cacheHeaderStatus = 'HIT';
-          cacheDetail = 'HTML Comment: Breeze';
-          if (!pluginsMap.has('breeze')) {
-            pluginsMap.set('breeze', {
-              slug: 'breeze',
-              version: '',
-              method: 'HTML Comment Signature',
-              evidence: text.substring(0, 80)
-            });
-          }
-          break;
         }
       }
-    } catch (e) {
-      // Ignore comment scan errors
     }
+    if (!any) return null;
+    return [...by.values()].map(({ seen, ...m }) => {
+      m.hits.sort((a, b) => (b.score || 0) - (a.score || 0));
+      return { ...m, total: m.hits.length };
+    }).filter((m) => m.total);
+  }
+  const SAFE_LINK = /^https:\/\/(www\.wordfence\.com|wpscan\.com)\//;
+  function vulnRowHTML(m) {
+    const top = m.hits[0];
+    const srcs = [...new Set(m.hits.flatMap((h) => h.sources))];
+    const fixes = m.hits.map((h) => (h.patched || [])[0]).filter(Boolean);
+    const fixAll = fixes.length === m.hits.length && fixes.length ? fixes.reduce((a, b) => (compareVersions(a, b) >= 0 ? a : b)) : '';
+    const summary = `${top.title}${m.total > 1 ? ` · and ${m.total - 1} more` : ''}`;
+    const hits = m.hits.map((h) => {
+      const sev = h.rating || h.score != null ? `<span class="tag bad">${esc([h.rating, h.score != null ? Number(h.score).toFixed(1) : ''].filter(Boolean).join(' '))}</span>` : '';
+      const cves = (h.cve || []).filter((c) => /^CVE-\d{4}-\d{3,}$/.test(c)).map((c) => `<a href="https://www.cve.org/CVERecord?id=${c}" target="_blank" rel="noopener noreferrer">${c}</a>`);
+      const fix = h.patched && h.patched.length ? `Fixed in <span class="mono">${esc(h.patched[0])}</span>` : '<span class="pflag bad">No fix listed</span>';
+      const by = h.sources.map((src) => {
+        const name = esc(VULN_PROVIDERS[src] ? VULN_PROVIDERS[src].label : src);
+        const url = h.links && h.links[src];
+        return url && SAFE_LINK.test(url) ? `<a class="vsrc-chip" href="${esc(url)}" target="_blank" rel="noopener noreferrer">${name} ↗</a>` : `<span class="vsrc-chip">${name}</span>`;
+      }).join('');
+      return `<li class="vhit">
+        <div class="vhit-t">${esc(h.title || 'Untitled issue')}</div>
+        <div class="vhit-m">${sev}${cves.join('')}<span>${fix}</span>${h.published ? `<span class="aux">${esc(h.published)}</span>` : ''}</div>
+        <div class="vhit-s"><span class="aux">Reported by</span>${by}</div>
+      </li>`;
+    }).join('');
+    return `<div class="row clickable wide vrow" role="button" tabindex="0" aria-expanded="false" data-reveal data-vkey="${esc(m.type + ':' + m.slug)}">
+        <dt><span class="v">${esc(m.name)} ${esc(m.version)}</span></dt><dd><span class="tag bad">${m.total} known${top.rating ? ` · ${esc(top.rating)}` : ''}</span></dd>${ICON.chev}
+      </div>
+      <div class="reveal"><div><div class="theme-card vcard">
+        <div class="aux">${fixAll ? `Update to <span class="mono">${esc(fixAll)}</span> or later to fix ${m.total === 1 ? 'it' : 'all of these'}.`
+          : m.total === 1 ? `No fixed version is listed yet. Check the ${m.type === 'core' ? 'WordPress' : m.type}’s changelog${m.type === 'plugin' ? ', or consider replacing it' : ''}.`
+          : `${m.total - fixes.length} of these ${m.total} have no fixed version listed yet.`} Found by ${esc(srcNames(srcs))}.</div>
+        <ul class="vhits">${hits}</ul>
+      </div></div></div>
+      <div class="row note-row vnote"><span class="aux clip" title="${esc(summary)}">${esc(summary)}</span></div>`;
+  }
+  const srcNames = (list) => list.map((x) => VULN_PROVIDERS[x] ? VULN_PROVIDERS[x].label : x).join(', ');
+  const vulnCount = () => { const m = vulnMatches(); return m ? m.length : 0; };
+  const vulnError = (st) => st.error + (st.retryAt ? ` · trying again after ${new Date(st.retryAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}` : '');
+  function vulnItems() {
+    if (!vuln.loaded) return [{ pending: true }];
+    const st = vuln.status || {};
+    const on = Object.keys(VULN_PROVIDERS).filter((k) => provOn(st[k]));
+    if (!on.length) return [{ label: 'Off', cls: '', tag: 'Not set up', note: 'Add a Wordfence or WPScan key in Settings to check known vulnerabilities' }];
+    const rows = [];
+    if (provOn(st.wordfence) && !Array.isArray(vuln.results.wordfence)) {
+      rows.push(st.wordfence.error ? { label: 'Wordfence', cls: 'warn', tag: 'Unavailable', note: vulnError(st.wordfence) } : { label: 'Wordfence', cls: '', tag: 'Downloading', note: 'Getting the Wordfence vulnerability list…' });
+    }
+    if (provOn(st.wpscan) && vuln.wpscanError) rows.push({ label: 'WPScan', cls: 'warn', tag: 'Problem', note: vulnError({ error: vuln.wpscanError, retryAt: vuln.wpscanRetryAt }) });
+    const matches = vulnMatches();
+    if (matches && !matches.length) {
+      const used = Object.keys(vuln.results).filter((k) => Array.isArray(vuln.results[k]));
+      const n = (vuln.items || []).length;
+      rows.push({ label: 'Known issues', cls: 'ok', tag: 'None found', note: `Checked ${n} version${n === 1 ? '' : 's'} with ${srcNames(used)}` });
+    }
+    (matches || []).forEach((m) => rows.push({ html: vulnRowHTML(m), cls: 'bad' }));
+    return rows.length ? rows : [{ pending: true }];
   }
 
-  // 4. REST API Namespace detection
-  try {
-    const origin = urlParams.origin;
-    let restRes = await fetch(origin + '/wp-json');
-    if (!restRes.ok) {
-      restRes = await fetch(origin + '/?rest_route=/');
-    }
-    
-    if (restRes.ok) {
-      const restData = await restRes.json();
-      if (restData && restData.namespaces && Array.isArray(restData.namespaces)) {
-        const coreNamespaces = ['oembed', 'wp', 'wp-site-health', 'wp-block-editor', 'wp-abilities'];
-        
-        restData.namespaces.forEach(ns => {
-          const parts = ns.split('/');
-          if (parts.length > 0) {
-            let prefix = parts[0].toLowerCase();
-            if (!coreNamespaces.includes(prefix) && prefix.length > 1) {
-               // Map common discrepancies
-               if (prefix === 'ldlms') prefix = 'sfwd-lms'; // LearnDash
-               if (prefix === 'yoast') prefix = 'wordpress-seo';
-               if (prefix === 'wc') prefix = 'woocommerce';
-               
-               if (!pluginsMap.has(prefix)) {
-                 pluginsMap.set(prefix, {
-                   slug: prefix,
-                   version: 'REST API',
-                   method: 'REST API Namespace',
-                   evidence: `${origin}/wp-json/${ns}`
-                 });
-               }
-            }
-          }
-        });
+  // ---- Settings pane: add or remove a key per provider
+  let settingsReturnTab = 'overview', keysChanged = false;
+  async function renderSettings() {
+    let all = {};
+    try { all = (await chrome.runtime.sendMessage({ type: 'VULN_STATUS' })) || {}; } catch (e) {}
+    for (const k of Object.keys(VULN_PROVIDERS)) {
+      const st = all[k] || {};
+      let html = '<span class="tag">Off</span> No key added';
+      if (st.hasKey && !st.permission) html = '<span class="tag warn">Problem</span> Permission to reach this provider was removed. Save the key again';
+      else if (provOn(st)) {
+        if (k === 'wordfence') {
+          const when = st.updated ? new Date(st.updated).toLocaleString() : '';
+          html = st.refreshing ? '<span class="tag">Downloading…</span> Getting the vulnerability list'
+            : st.error ? `<span class="tag warn">Problem</span> ${esc(vulnError(st))}`
+            : st.updated ? `<span class="tag ok">On</span> ${st.count.toLocaleString()} entries · updated ${esc(when)}` : '<span class="tag">Waiting</span> The list downloads when you next open a WordPress site';
+        } else if (st.retryAt) html = `<span class="tag warn">Paused</span> ${esc(vulnError({ error: 'Daily request limit used up', retryAt: st.retryAt }))}`;
+        else if (st.error) html = `<span class="tag warn">Problem</span> ${esc(st.error)}`;
+        else html = '<span class="tag ok">On</span> Checks run when you open the popup on a WordPress site';
       }
+      $('status-' + k).innerHTML = html;
+      $('state-' + k).innerHTML = provOn(st) ? '<span class="tag ok">On</span>' : '';
+      $('remove-' + k).hidden = !st.hasKey;
+      const input = $('key-' + k);
+      input.value = '';
+      input.placeholder = st.hasKey ? 'Key saved · paste a new one to replace it' : input.getAttribute('aria-label').replace(' API key', '') + ' API key';
     }
-  } catch (e) {
-    // Ignore REST API errors
+  }
+  function openSettings() {
+    settingsReturnTab = (document.querySelector('.pp-tab[aria-selected="true"]') || {}).dataset?.tab || 'overview';
+    PANES.forEach((k) => { $('pane-' + k).hidden = true; });
+    $('state-empty').hidden = true; $('state-loading').hidden = true;
+    $('pane-settings').hidden = false;
+    $('body').scrollTop = 0;
+    renderSettings();
+  }
+  function closeSettings() {
+    $('pane-settings').hidden = true;
+    if (report) { selectTab(settingsReturnTab); if (keysChanged) { keysChanged = false; runVulnLookup(); } } else runDiagnostics();
+  }
+  async function saveVulnKey(provider) {
+    const P = VULN_PROVIDERS[provider];
+    if (!P) return;
+    const key = $('key-' + provider).value.trim();
+    if (!/^[A-Za-z0-9_\-.=]{16,}$/.test(key)) { toast(`That doesn’t look like a ${P.label} API key`); return; }
+    // Chrome's permission prompt takes focus, which closes this popup before the request resolves.
+    // So hand the key to the background worker first: it saves the key and starts the download as
+    // soon as the permission is granted (chrome.permissions.onAdded), even if the popup is gone.
+    // Not awaited, so the request below still runs inside the click's user gesture.
+    chrome.runtime.sendMessage({ type: 'VULN_PENDING_KEY', provider, key }).catch(() => {});
+    let granted = false;
+    try { granted = await chrome.permissions.request({ origins: [P.origin] }); } catch (e) {}
+    if (!granted) {
+      chrome.runtime.sendMessage({ type: 'VULN_PENDING_KEY', provider, key: '' }).catch(() => {});
+      toast(`WPScout needs permission to reach ${P.label} to check vulnerabilities`);
+      return;
+    }
+    if (provider === 'wordfence') $('status-wordfence').innerHTML = '<span class="tag">Downloading…</span> Getting the vulnerability list';
+    try { await chrome.runtime.sendMessage({ type: 'VULN_SET_KEY', provider, key }); } catch (e) {}
+    keysChanged = true;
+    toast(`${P.label} key saved`);
+    renderSettings();
+  }
+  async function removeVulnKey(provider) {
+    const P = VULN_PROVIDERS[provider];
+    if (!P) return;
+    try { await chrome.runtime.sendMessage({ type: 'VULN_CLEAR', provider }); } catch (e) {}
+    keysChanged = true;
+    vuln.results = { ...vuln.results, [provider]: undefined };
+    if (provider === 'wpscan') vuln.wpscanError = '';
+    toast(`${P.label} key removed`);
+    renderSettings();
   }
 
-  return {
-    isWP,
-    url: document.location.href,
-    protocol: urlParams.protocol,
-    version,
-    theme,
-    themeVersion,
-    serverSoftware,
-    proxyCDN,
-    phpVersion,
-    cacheSystem,
-    cacheHeaderStatus,
-    cacheDetail,
-    plugins: Array.from(pluginsMap.values())
+  // ---- Performance snapshot (this visit, measured by the browser)
+  const fmtMs = (ms) => ms >= 1000 ? `${(ms / 1000).toFixed(ms >= 10000 ? 0 : 1)} s` : `${ms} ms`;
+  const fmtBytes = (b) => b >= 1048576 ? `${(b / 1048576).toFixed(1)} MB` : b >= 1024 ? `${Math.round(b / 1024)} KB` : `${b} B`;
+  function perfItems() {
+    const f = report.perf;
+    if (f === undefined) return [{ pending: true }, { pending: true }, { pending: true }];
+    if (!f) return [{ label: 'Performance', cls: '', tag: 'Not measured', note: 'Reload this tab, then open WPScout again.' }];
+    const items = [];
+    if (f.ttfb !== null) items.push({ label: 'Response', cls: f.ttfb <= 800 ? 'ok' : f.ttfb <= 1800 ? 'warn' : 'bad', tag: fmtMs(f.ttfb), note: 'Time to first byte' });
+    if (f.load !== null) items.push({ label: 'Page load', cls: f.load <= 3000 ? 'ok' : f.load <= 6000 ? 'warn' : 'bad', tag: fmtMs(f.load), note: f.domReady ? `DOM ready at ${fmtMs(f.domReady)}` : '' });
+    else items.push({ label: 'Page load', cls: '', tag: 'Still loading', note: 'Rescan once the page finishes loading' });
+    items.push({ label: 'Page weight', cls: f.bytes > 3 * 1048576 ? 'warn' : 'ok', tag: `${f.bytesPartial ? 'at least ' : ''}${fmtBytes(f.bytes)}`, note: 'Transferred on this visit; cached files count as 0' });
+    items.push({ label: 'Requests', cls: f.requests > 120 ? 'warn' : 'ok', tag: String(f.requests), note: `${f.stylesheets} stylesheet${f.stylesheets === 1 ? '' : 's'}` });
+    if (f.protocol) {
+      const p = f.protocol.toLowerCase();
+      items.push({ label: 'Protocol', cls: /h2|h3|quic/.test(p) ? 'ok' : 'warn', tag: p === 'h2' ? 'HTTP/2' : p === 'h3' ? 'HTTP/3' : p.toUpperCase(), note: /h2|h3|quic/.test(p) ? '' : 'An older protocol; HTTP/2 or HTTP/3 loads faster' });
+    }
+    if (f.images) {
+      const share = f.modernImages / f.images;
+      items.push({ label: 'Image formats', cls: f.images >= 4 && share < 0.5 ? 'warn' : 'ok', tag: `${f.modernImages} of ${f.images} modern`, note: 'WebP or AVIF' });
+      items.push({ label: 'Lazy loading', cls: f.images >= 8 && !f.lazyImages ? 'warn' : 'ok', tag: `${f.lazyImages} of ${f.images}`, note: 'Images with loading="lazy"' });
+    }
+    items.push({ label: 'Blocking scripts', cls: f.blockingScripts > 3 ? 'warn' : 'ok', tag: String(f.blockingScripts), note: 'In <head> without async or defer' });
+    items.push({ label: 'DOM size', cls: f.domNodes > 1500 ? 'warn' : 'ok', tag: `${f.domNodes.toLocaleString()} nodes`, note: '' });
+    return items;
+  }
+
+  async function runPerf(tabId) {
+    const r = report;
+    if (!r) return;
+    let data = null;
+    try { const res = await messageTab(tabId, 'WP_PERF'); if (res && res.ok) data = res.data; } catch (e) {}
+    if (!data) {
+      try { const out = await chrome.scripting.executeScript({ target: { tabId }, func: readPerf }); data = out && out[0] ? out[0].result : null; } catch (e) {}
+    }
+    if (report !== r) return;
+    r.perf = data || null;
+    refreshHealthViews();
+  }
+
+  // ---- Content stats (from the popup-time checks) and multisite (from the scan)
+  function relDate(iso) {
+    const t = Date.parse(iso);
+    if (!Number.isFinite(t)) return '';
+    const days = Math.round((Date.now() - t) / 86400000);
+    return days <= 0 ? 'today' : days === 1 ? 'yesterday' : days < 31 ? `${days} days ago` : relativeAge(iso);
+  }
+  function contentHTML() {
+    const d = report, c = d.deep && !d.deep.error ? d.deep.content : null;
+    const sk = (w) => `<span class="sk" style="width:${w}px"></span>`;
+    const n = (v) => (v === null || v === undefined ? '<span class="aux">Not public</span>' : `<span class="v">${v.toLocaleString()}</span>`);
+    const rows = [];
+    if (!d.deep) rows.push(`<div class="row"><dt>Posts</dt><dd>${sk(60)}</dd><span></span></div>`, `<div class="row"><dt>Latest post</dt><dd>${sk(110)}</dd><span></span></div>`);
+    else if (!c) rows.push('<div class="row"><dt>Content</dt><dd><span class="aux">Couldn’t read the REST API</span></dd><span></span></div>');
+    else {
+      rows.push(`<div class="row"><dt>Posts</dt><dd>${n(c.posts)}</dd><span></span></div>`);
+      rows.push(`<div class="row"><dt>Latest post</dt><dd>${c.latestPost ? `<span class="v">${esc(relDate(c.latestPost))}</span><span class="num">${esc(c.latestPost.slice(0, 10))}</span>` : '<span class="aux">None public</span>'}</dd><span></span></div>`);
+      rows.push(`<div class="row"><dt>Pages</dt><dd>${n(c.pages)}</dd><span></span></div>`);
+      if (c.products !== null && c.products !== undefined) rows.push(`<div class="row"><dt>Products</dt><dd>${n(c.products)}</dd><span></span></div>`);
+    }
+    rows.push(`<div class="row"><dt>Multisite</dt><dd>${d.multisite ? `<span class="v">Network site</span><span class="num">#${esc(d.multisite.siteId)}</span>` : '<span class="aux">Not detected</span>'}</dd><span></span></div>`);
+    return `<div class="grp"><div class="grp-h"><h2>Content</h2></div><dl class="rows">${rows.join('')}</dl></div>`;
+  }
+
+  // ---- Checks tab and Health summary
+  function renderChecks() {
+    const d = report;
+    const upd = [];
+    if (coreOutdated()) {
+      const behind = coreMajorsBehind();
+      upd.push(`<div class="row wide"><dt><span class="v">WordPress</span>${behind >= 2 ? ` <span class="pflag warn">${behind} major versions behind</span>` : ''}</dt><dd>${verArrow(d.version, d._coreLatest)}</dd></div>`);
+    }
+    const tl = themeLatest();
+    if (tl) upd.push(`<div class="row wide"><dt><span class="v">${esc(themeInfo().name)}</span> <span class="aux">theme</span></dt><dd>${verArrow(themeInfo().version, tl)}</dd></div>`);
+    outdatedPlugins().forEach((p) => upd.push(`<div class="row wide"><dt><span class="v">${esc(pluginName(p))}</span></dt><dd>${verArrow(p.version, p.latest)}</dd></div>`));
+    const updBody = updatesPending ? checkRowHTML({ pending: true })
+      : upd.length ? upd.join('')
+      : '<div class="row"><dt>Versions</dt><dd><span class="tag ok">Up to date</span><span class="aux clip">No updates found for the versions this page shows</span></dd><span></span></div>';
+    const issues = pluginIssues();
+    const healthBody = updatesPending ? checkRowHTML({ pending: true })
+      : issues.length ? issues.map(([p, i]) => `<div class="row wide" title="${esc(i.text)}"><dt><span class="v">${esc(pluginName(p))}</span></dt><dd><span class="tag ${i.cls}">${esc(i.short)}</span></dd></div><div class="row note-row"><span class="aux clip">${esc(i.text)}</span></div>`).join('')
+      : '<div class="row"><dt>Plugins</dt><dd><span class="tag ok">No issues</span><span class="aux clip">None closed, stale or untested on WordPress.org</span></dd><span></span></div>';
+    const vul = vulnItems();
+    const sec = securityItems(), seo = seoItems(), perf = perfItems();
+    const openV = [...document.querySelectorAll('#pane-checks [data-vkey][aria-expanded="true"]')].map((e) => e.dataset.vkey);
+    $('pane-checks').innerHTML = `
+      <div class="grp"><div class="grp-h"><h2>Updates${upd.length ? ` · ${upd.length}` : ''}</h2></div><dl class="rows">${updBody}</dl></div>
+      <div class="grp"><div class="grp-h"><h2>Vulnerabilities</h2><button class="link" type="button" data-action="open-settings">Settings</button></div><dl class="rows">${vul.map(checkRowHTML).join('')}</dl></div>
+      <div class="grp"><div class="grp-h"><h2>Plugin health${issues.length ? ` · ${issues.length}` : ''}</h2></div><dl class="rows">${healthBody}</dl></div>
+      <div class="grp"><div class="grp-h"><h2>Security</h2>${d.deep ? '' : '<span class="aux" style="font-size:12px">Checking the site…</span>'}</div><dl class="rows">${sec.map(checkRowHTML).join('')}</dl></div>
+      <div class="grp"><div class="grp-h"><h2>Performance</h2><span class="aux" style="font-size:12px">This visit</span></div><dl class="rows">${perf.map(checkRowHTML).join('')}</dl></div>
+      <div class="grp"><div class="grp-h"><h2>SEO</h2></div><dl class="rows">${seo.map(checkRowHTML).join('')}</dl></div>`;
+    openV.forEach((k) => toggleReveal(document.querySelector(`#pane-checks [data-vkey="${CSS.escape(k)}"]`), true));
+    const total = upd.length + issues.length + issueCount(vul) + issueCount(sec) + issueCount(seo) + issueCount(perf);
+    $('tab-checks-count').textContent = total ? String(total) : '';
+  }
+
+  function healthRowHTML() {
+    const u = updatesPending ? null : updateCount();
+    const s = report.deep ? issueCount(securityItems()) : null;
+    const seo = issueCount(seoItems());
+    const ph = updatesPending ? 0 : pluginIssues().length;
+    const v = vulnCount();
+    const parts = [];
+    if (v) parts.push(`<span class="tag bad">${v} vulnerabilit${v === 1 ? 'y' : 'ies'}</span>`);
+    if (u === null) parts.push('<span class="sk" style="width:70px"></span>');
+    else parts.push(u ? `<span class="tag warn">${u} update${u === 1 ? '' : 's'}</span>` : '<span class="tag ok">Up to date</span>');
+    if (s === null) parts.push('<span class="sk" style="width:80px"></span>');
+    else if (s) parts.push(`<span class="aux">${s} security</span>`);
+    if (ph) parts.push(`<span class="aux">${ph} plugin</span>`);
+    if (seo) parts.push(`<span class="aux">${seo} SEO</span>`);
+    return `<div class="row clickable" role="button" tabindex="0" data-goto="checks" id="health-row"><dt>Health</dt><dd>${parts.join('<span class="sep"></span>')}</dd>${ICON.chev}</div>`;
+  }
+
+  // Re-render the parts that depend on update/deep-check results, keeping open rows open.
+  function refreshHealthViews() {
+    if (!report) return;
+    const hr = $('health-row');
+    if (hr) hr.outerHTML = healthRowHTML();
+    renderSiteSub();
+    renderHosting();
+    renderChecks();
+    const open = document.querySelector('#stack-rows [data-reveal]')?.getAttribute('aria-expanded') === 'true';
+    renderOverview();
+    if (open) toggleReveal(document.querySelector('#stack-rows [data-reveal]'), true);
+    renderPlugins();
+  }
+
+  function renderSiteSub() {
+    const d = report;
+    // Nightly/RC builds report "7.2-RC2-65695"; the trailing build number only crowds the header.
+    const shownVersion = String(d.version || '').replace(/-\d{4,}$/, '');
+    const ver = known(d.version) ? `WordPress ${esc(shownVersion)}` : 'WordPress <span style="font-weight:400;color:var(--ink-3)">· version hidden</span>';
+    // When core is behind, the update note replaces the confidence (still shown on the Evidence tab).
+    const tail = coreOutdated() ? '<span class="upd-note">update available</span>' : `${esc(d.confidence || '')} confidence`;
+    $('site-sub').innerHTML = `<span class="dot"></span><b>${ver}</b><span class="sep"></span>${tail}`;
+  }
+
+  const TECH_GROUPS = [['Analytics and tags', ['Analytics']], ['Libraries and fonts', ['Libraries', 'Fonts']], ['Widgets', ['Payments', 'Chat', 'Captcha', 'Cookie consent']]];
+  function techHTML() {
+    const tech = report.tech || [];
+    if (!tech.length) return '<div class="grp"><div class="grp-h"><h2>Tech stack</h2></div><dl class="rows"><div class="row"><dt>Third-party</dt><dd><span class="aux">No tags, libraries or widgets detected</span></dd><span></span></div></dl></div>';
+    return TECH_GROUPS.map(([title, cats]) => {
+      const items = tech.filter((t) => cats.includes(t.category));
+      if (!items.length) return '';
+      return `<div class="grp"><div class="grp-h"><h2>${esc(title)}</h2></div><dl class="rows">${items.map((t) =>
+        `<div class="row wide" title="${esc(t.evidence)}"><dt><span class="v">${esc(t.name)}</span>${t.version ? ` <span class="num">${esc(t.version)}</span>` : ''}</dt><dd>${t.detail ? `<span class="num clip">${esc(t.detail)}</span>` : `<span class="aux">${esc(t.category)}</span>`}</dd></div>`).join('')}</dl></div>`;
+    }).join('');
+  }
+
+  // Reports from an older content script (still running in a tab after an update) lack
+  // the SEO, tech-stack and security-header fields. Re-read them once by injecting the
+  // current detector, so the Checks and Stack tabs aren't empty.
+  async function fillMissingFields(tabId) {
+    const r = report;
+    if (!r || (r.seo && Array.isArray(r.tech) && r.securityHeaders !== undefined)) return;
+    try {
+      const out = await chrome.scripting.executeScript({ target: { tabId }, func: detectWordPress });
+      const fresh = out && out[0] ? out[0].result : null;
+      if (!fresh || report !== r) return;
+      r.seo = fresh.seo || null;
+      r.tech = fresh.tech || [];
+      r.securityHeaders = fresh.securityHeaders === undefined ? null : fresh.securityHeaders;
+      renderHosting();
+      refreshHealthViews();
+      notifyTabStatus(tabId, true, r.plugins.length, r);
+    } catch (e) {}
+  }
+
+  // Popup-time checks: ask the content script; if it can't answer (missing, or an older
+  // version still running in the tab after an update), inject deepChecks() directly.
+  async function runDeepChecks(tabId) {
+    const r = report;
+    if (!r || r.deep) return;
+    let data = null;
+    try {
+      const res = await messageTab(tabId, 'WP_DEEP_CHECKS');
+      if (res && res.ok && res.data) data = res.data;
+    } catch (e) {}
+    if (!data) {
+      try {
+        const out = await chrome.scripting.executeScript({ target: { tabId }, func: deepChecks });
+        data = out && out[0] ? out[0].result : null;
+      } catch (e2) {}
+    }
+    if (report !== r) return;
+    r.deep = data || { error: true };
+    refreshHealthViews();
+    if (data) notifyTabStatus(tabId, true, r.plugins.length, r);
+  }
+
+  // ------------------------------------------------------------------ report text / export
+  function generateReportText() {
+    const d = report;
+    const t = themeInfo();
+    const list = sortedPlugins(d.plugins);
+    const line = (k, v) => `- **${k}:** ${v}`;
+    const sigs = SIGNALS.map(([k, label]) => `- [${d.signals[k] && d.signals[k].detected ? 'x' : ' '}] ${label}`);
+    return [
+      `# ${hostOf(d.url)}`,
+      '',
+      d.pageTitle && d.pageTitle !== 'WordPress Site' ? `${d.pageTitle} · ${d.url}` : `${d.url}`,
+      `WordPress ${known(d.version) ? d.version : '(version hidden)'} · ${d.confidence} confidence · ${d.signalScore}/7 signals${d.isUserLoggedIn ? ' · you are logged in' : ''}`,
+      '',
+      '## Stack',
+      line('Theme', known(d.theme) ? `${t.name}${t.version ? ' ' + t.version : ''} (\`${d.theme}\`)${t.child ? ` · parent theme: ${formatThemeName(t.parent)}` : ''}` : 'Not detected'),
+      line('Builder', d.pageBuilder || 'None detected'),
+      line('Store', known(d.ecommerce) ? d.ecommerce : 'None'),
+      line('Hosting', known(d.hostingPlatform) ? d.hostingPlatform : (known(d.proxyCDN) ? d.proxyCDN : 'Not identified')),
+      line('Web server', known(d.serverSoftware) ? d.serverSoftware : 'Not exposed'),
+      line('PHP', known(d.phpVersion) ? d.phpVersion.replace(/^PHP\//i, '') : 'Not exposed'),
+      line('CDN / edge', known(d.proxyCDN) ? d.proxyCDN : 'None detected'),
+      line('Page cache', known(d.cacheHeaderStatus) ? `${d.cacheHeaderStatus} (${d.cacheSystem})` : 'Not detected'),
+      line('IP', d.ip || 'Unknown'),
+      line('Network', d.isp || 'Unknown'),
+      line('Location', stripFlag(d.location) || 'Unknown'),
+      line('Nameservers', d.dns || 'Unknown'),
+      '',
+      `## Plugins (${list.length})`,
+      ...list.map((p) => `- ${pluginName(p)} ${hasVersion(p) ? p.version : '(version unknown)'}${p.latest ? ` → ${p.latest} available` : ''} · \`${p.slug}\` · ${p.category}`),
+      '',
+      '## Updates',
+      ...(() => {
+        const out = [];
+        if (coreOutdated()) out.push(`- WordPress ${d.version} → ${d._coreLatest}`);
+        if (themeLatest()) out.push(`- Theme ${t.name} ${t.version} → ${themeLatest()}`);
+        outdatedPlugins().forEach((p) => out.push(`- ${pluginName(p)} ${p.version} → ${p.latest}`));
+        return out.length ? out : [updatesPending ? '- Still checking' : '- None found for the versions this page shows'];
+      })(),
+      '',
+      '## Vulnerabilities',
+      ...(() => {
+        const m = vulnMatches();
+        if (!m) return ['- Not checked (add a Wordfence or WPScan key in Settings)'];
+        if (!m.length) return [`- None found (${srcNames(Object.keys(vuln.results).filter((k) => Array.isArray(vuln.results[k])))})`];
+        return m.map((x) => `- ${x.name} ${x.version}: ${x.total} known (${x.hits.slice(0, 3).map((h) => `${h.title}${h.cve.length ? ` [${h.cve[0]}]` : ''}`).join('; ')}) · ${srcNames([...new Set(x.hits.flatMap((h) => h.sources))])}`);
+      })(),
+      '',
+      '## Plugin health',
+      ...(pluginIssues().length ? pluginIssues().map(([p, i]) => `- ${pluginName(p)}: ${i.text}`) : ['- No closed, stale or untested plugins found']),
+      '',
+      '## Performance (this visit)',
+      ...perfItems().filter((i) => !i.pending).map((i) => `- ${i.label}: ${i.tag}${i.note ? ` (${i.note})` : ''}`),
+      '',
+      '## Content',
+      ...(() => { const c = d.deep && !d.deep.error ? d.deep.content : null; const out = [];
+        if (c) { out.push(`- Posts: ${c.posts ?? 'not public'}`, `- Pages: ${c.pages ?? 'not public'}`); if (c.latestPost) out.push(`- Latest post: ${c.latestPost.slice(0, 10)}`); if (c.products !== null && c.products !== undefined) out.push(`- Products: ${c.products}`); }
+        out.push(`- Multisite: ${d.multisite ? `network site #${d.multisite.siteId}` : 'not detected'}`); return out; })(),
+      '',
+      '## Security',
+      ...securityItems().filter((i) => !i.pending).map((i) => `- ${i.label}: ${i.tag}${i.note ? ` (${i.note.slice(0, 120)})` : ''}`),
+      '',
+      '## SEO',
+      ...seoItems().filter((i) => !i.pending).map((i) => `- ${i.label}: ${i.tag}${i.note ? ` (${i.note.slice(0, 120)})` : ''}`),
+      '',
+      '## Tech stack',
+      ...((d.tech && d.tech.length) ? d.tech.map((x) => `- ${x.name}${x.version ? ' ' + x.version : ''}${x.detail ? ` (${x.detail})` : ''} · ${x.category}`) : ['- No third-party tags, libraries or widgets detected']),
+      '',
+      '## Evidence',
+      ...sigs,
+      '',
+      `_Scouted with WPScout${APP_VERSION ? ' ' + APP_VERSION : ''}_`
+    ].join('\n');
+  }
+
+  function exportJSON() {
+    const clean = { ...report };
+    delete clean._wpTheme;
+    const blob = new Blob([JSON.stringify(clean, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `wpscout-${hostOf(report.url)}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    toast(`Saved ${a.download}`);
+  }
+
+  // ------------------------------------------------------------------ interactions
+  function toggleReveal(trigger, force) {
+    if (!trigger) return;
+    const panel = trigger.nextElementSibling && trigger.nextElementSibling.classList.contains('reveal') ? trigger.nextElementSibling : null;
+    if (!panel) return;
+    const open = typeof force === 'boolean' ? force : trigger.getAttribute('aria-expanded') !== 'true';
+    trigger.setAttribute('aria-expanded', String(open));
+    panel.classList.toggle('open', open);
+  }
+
+  const menu = $('menu'), menuBtn = $('menu-btn');
+  function setMenu(open) {
+    menu.hidden = !open;
+    menuBtn.setAttribute('aria-expanded', String(open));
+    if (open) { const first = menu.querySelector('.mi:not(:disabled)'); if (first) first.focus(); }
+  }
+
+  function wire() {
+    $('tabs').addEventListener('click', (e) => { const t = e.target.closest('.pp-tab'); if (t) selectTab(t.dataset.tab); });
+    $('tabs').addEventListener('keydown', (e) => {
+      if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
+      e.preventDefault();
+      const tabs = [...document.querySelectorAll('.pp-tab')];
+      const i = tabs.findIndex((t) => t.getAttribute('aria-selected') === 'true');
+      const next = tabs[(i + (e.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length];
+      selectTab(next.dataset.tab, true);
+    });
+
+    menuBtn.addEventListener('click', (e) => { e.stopPropagation(); setMenu(menu.hidden); });
+    document.addEventListener('click', (e) => { if (!menu.hidden && !e.target.closest('#menu')) setMenu(false); });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && !menu.hidden) { setMenu(false); menuBtn.focus(); }
+      if (!menu.hidden && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+        e.preventDefault();
+        const items = [...menu.querySelectorAll('.mi:not(:disabled)')];
+        const i = items.indexOf(document.activeElement);
+        items[(i + (e.key === 'ArrowDown' ? 1 : items.length - 1)) % items.length].focus();
+      }
+    });
+
+    $('rescan-btn').addEventListener('click', () => runDiagnostics(true));
+    $('empty-rescan').addEventListener('click', () => runDiagnostics(true));
+    $('copy-btn').addEventListener('click', () => { if (report) copyText(generateReportText(), 'Stack report copied'); });
+
+    $('plugin-search').addEventListener('input', () => { if (report) renderPluginList(); });
+    $('chips').addEventListener('click', (e) => {
+      const c = e.target.closest('.chip');
+      if (!c) return;
+      activeCat = c.dataset.cat;
+      $('chips').querySelectorAll('.chip').forEach((x) => x.setAttribute('aria-pressed', String(x === c)));
+      renderPluginList();
+    });
+
+    document.addEventListener('click', (e) => {
+      const goto = e.target.closest('[data-goto]');
+      if (goto) { selectTab(goto.dataset.goto); return; }
+
+      const open = e.target.closest('[data-open]');
+      if (open) { openUrl(open.dataset.open); return; }
+
+      const cp = e.target.closest('[data-copy]');
+      if (cp) { copyText(cp.dataset.copy, cp.dataset.copyMsg || 'Copied'); return; }
+
+      const act = e.target.closest('[data-action]');
+      if (act) {
+        const a = act.dataset.action;
+        if (a === 'theme') { toggleTheme(); setMenu(false); }
+        if (a === 'export-json' && report) { exportJSON(); setMenu(false); }
+        if (a === 'copy-plugins' && report) {
+          const txt = sortedPlugins(report.plugins).map((p) => `${p.slug}${hasVersion(p) ? ' ' + p.version : ''}`).join('\n');
+          copyText(txt, `${report.plugins.length} plugin slugs copied`);
+          setMenu(false);
+        }
+        if (a === 'copy-theme' && report) {
+          const t = themeInfo();
+          copyText(`Theme: ${t.name}\nSlug: ${t.slug}\nVersion: ${t.version || 'Unknown'}\nAuthor: ${t.author || 'Unknown'}\nSite: ${report.url}`, 'Theme details copied');
+        }
+        if (a === 'reload-tab' && currentTab) { chrome.tabs.reload(currentTab.id); window.close(); }
+        if (a === 'open-settings') { setMenu(false); openSettings(); }
+        if (a === 'close-settings') closeSettings();
+        if (a === 'save-key') saveVulnKey(act.dataset.provider);
+        if (a === 'remove-key') removeVulnKey(act.dataset.provider);
+        if (a === 'clear-search') { $('plugin-search').value = ''; renderPluginList(); $('plugin-search').focus(); }
+        return;
+      }
+
+      const rev = e.target.closest('[data-reveal], .pl-main, .sig-main');
+      if (rev && !rev.disabled) toggleReveal(rev);
+    });
+
+    document.addEventListener('keydown', (e) => {
+      const r = e.target.closest && e.target.closest('[role="button"][data-reveal], [role="button"][data-goto]');
+      if (r && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); r.click(); }
+    });
+
+    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', syncThemeLabel);
+    if (document.fonts && document.fonts.ready) document.fonts.ready.then(placeInk);
+  }
+
+  // ------------------------------------------------------------------ background messaging
+  function notifyTabStatus(tabId, isWP, count = 0, data = null) {
+    if (!hasChrome || !tabId || !chrome.runtime || !chrome.runtime.sendMessage) return;
+    try { chrome.runtime.sendMessage({ type: 'WP_STATUS', isWP, tabId, count, data }, () => void chrome.runtime.lastError); } catch (e) {}
+  }
+
+  function isInternal(url) {
+    return !url || /^(chrome|chrome-extension|edge|about|devtools|view-source):/i.test(url) || /chromewebstore\.google\.com|chrome\.google\.com\/webstore/i.test(url);
+  }
+
+  // Ask the content script for its report. A normal open reuses the scan the page
+  // already ran (or is running); Rescan forces a fresh one. A scan can take several
+  // seconds on large sites, so the timeout is generous, and the script is only
+  // re-injected when there is no listener at all (not when it is merely slow).
+  const SCAN_TIMEOUT = 15000;
+  function messageTab(tabId, type) {
+    return Promise.race([
+      chrome.tabs.sendMessage(tabId, { type }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), SCAN_TIMEOUT))
+    ]);
+  }
+  async function askContentScript(tabId, force) {
+    const type = force ? 'WP_RESCAN' : 'GET_CONTENT_DATA';
+    try {
+      const res = await messageTab(tabId, type);
+      return res && res.ok ? res.data : null;
+    } catch (e) {
+      if (e && e.message === 'timeout') throw new Error('The page took too long to answer. Reload it, then rescan.');
+    }
+    // No content script in this tab (opened before install/update): inject and retry once.
+    try {
+      await chrome.scripting.executeScript({ target: { tabId }, files: ['content.js'] });
+      const res = await messageTab(tabId, 'GET_CONTENT_DATA');
+      if (res && res.ok) return res.data;
+    } catch (e) {
+      if (e && e.message === 'timeout') throw new Error('The page took too long to answer. Reload it, then rescan.');
+    }
+    const out = await chrome.scripting.executeScript({ target: { tabId }, func: detectWordPress });
+    return out && out[0] ? out[0].result : null;
+  }
+
+  // ------------------------------------------------------------------ main flow
+  async function runDiagnostics(force = false) {
+    if (!hasChrome) return runPreview();
+    let tab = null;
+    try {
+      [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      currentTab = tab;
+      if (!tab || isInternal(tab.url)) {
+        if (tab && tab.id) notifyTabStatus(tab.id, false, 0);
+        renderEmpty('internal', tab);
+        return;
+      }
+
+      // 1. Cached report from the background worker: instant render.
+      if (!force && chrome.storage && chrome.storage.session) {
+        const key = 'report_' + tab.id;
+        const res = await chrome.storage.session.get(key).catch(() => null);
+        const cached = res && res[key];
+        if (cached) {
+          fromCache = true;
+          if (!cached.isWP) { renderEmpty('nowp', tab); return; }
+          renderReport(cached);
+          enrichTheme();
+          fillMissingFields(tab.id);
+          runDeepChecks(tab.id);
+          fillMissingFields(tab.id);
+          runPerf(tab.id);
+          if (!known(cached.ip) || cached.isp === undefined) {
+            enrichNetwork(cached).then((d) => {
+              if (report !== cached) return;
+              refreshNetworkViews();
+              notifyTabStatus(tab.id, true, d.plugins.length, d);
+            }).catch(() => {});
+          }
+          return;
+        }
+      }
+
+      // 2. Live scan.
+      fromCache = false;
+      report = null;
+      renderLoading(tab);
+      const data = await askContentScript(tab.id, force);
+      if (!data || !data.isWP) {
+        notifyTabStatus(tab.id, false, 0);
+        renderEmpty('nowp', tab);
+        return;
+      }
+      data.hostname = new URL(tab.url).hostname;
+      renderReport(data);
+      enrichTheme();
+      fillMissingFields(tab.id);
+      runDeepChecks(tab.id);
+      fillMissingFields(tab.id);
+      runPerf(tab.id);
+      await enrichNetwork(data);
+      if (report === data) refreshNetworkViews();
+      notifyTabStatus(tab.id, true, data.plugins.length, data);
+    } catch (e) {
+      const msg = (e && e.message) || '';
+      renderEmpty(/cannot access|permission|cannot be scripted|no tab with id/i.test(msg) ? 'reload' : 'error', tab, msg && !/^[A-Z][a-z]+Error/.test(msg) ? msg : '');
+    } finally {
+      $('rescan-btn').classList.remove('spinning');
+      $('rescan-btn').disabled = !tab || isInternal(tab.url);
+    }
+  }
+
+  function refreshNetworkViews() {
+    const open = document.querySelector('#stack-rows [data-reveal]')?.getAttribute('aria-expanded') === 'true';
+    const hostRow = document.querySelector('#stack-rows [data-goto="hosting"] dd');
+    if (hostRow) hostRow.innerHTML = hostingSummaryHTML();
+    renderHosting();
+    $('foot-when').textContent = fromCache ? 'Cached result for this tab' : 'Scanned just now';
+    if (open) toggleReveal(document.querySelector('#stack-rows [data-reveal]'), true);
+  }
+
+  // Standalone preview (popup.html opened directly in a browser tab).
+  // Hash options: #plugins / #hosting / #evidence, plus ,dark ,light ,loading ,empty ,internal
+  function runPreview() {
+    const opts = (location.hash || '').replace('#', '').split(/[,&]/).filter(Boolean);
+    if (opts.includes('dark')) applyTheme('dark');
+    if (opts.includes('light')) applyTheme('light');
+    const fake = { url: 'https://example.com/', title: 'New Tab' };
+    if (opts.includes('loading')) { renderLoading({ url: 'https://www.nasa.gov/' }); return; }
+    if (opts.includes('empty')) { renderEmpty('nowp', fake); return; }
+    if (opts.includes('internal')) { renderEmpty('internal', { url: 'chrome://newtab/', title: 'New Tab' }); return; }
+    fromCache = true;
+    const data = getSampleMockData();
+    renderReport(data, { tab: opts.find((o) => PANES.includes(o)) });
+    report._wpTheme = null;
+    if (!opts.includes('no-deep')) report.deep = SAMPLE_DEEP;
+    try { report.perf = readPerf(); } catch (e) { report.perf = null; }
+    if (opts.includes('vulns')) {
+      // Sample: the same Kirki issue from two providers counts once; WPScan button still offered.
+      vuln = { loaded: true, items: vulnQueryItems(),
+        status: { wordfence: { hasKey: true, permission: true }, wpscan: { hasKey: true, permission: true } },
+        results: {
+          wordfence: [{ type: 'plugin', slug: 'kirki', version: '5.1.0', hits: [
+            { title: 'Kirki <= 5.1.0 - Missing Authorization to Settings Update', score: 5.3, rating: 'Medium', cve: ['CVE-2026-0001'], patched: ['5.1.1'], published: '2026-09-14', url: 'https://www.wordfence.com/threat-intel/vulnerabilities/id/0000-sample' },
+            { title: 'Kirki <= 5.0.9 - Reflected Cross-Site Scripting', score: 6.1, rating: 'Medium', cve: ['CVE-2026-0002'], patched: ['5.1.0'], published: '2026-06-02', url: 'https://www.wordfence.com/threat-intel/vulnerabilities/id/0001-sample' }] }],
+          wpscan: [
+            { type: 'plugin', slug: 'kirki', version: '5.1.0', hits: [{ title: 'Kirki < 5.1.1 - Broken Access Control', score: 5.3, rating: 'Medium', cve: ['CVE-2026-0001'], patched: ['5.1.1'], url: 'https://wpscan.com/vulnerability/sample-1' }] },
+            { type: 'plugin', slug: 'popup-maker', version: '1.25.0', hits: [{ title: 'Popup Maker <= 1.25.0 - Stored XSS via shortcode', score: 6.4, rating: 'Medium', cve: [], patched: [], published: '2026-10-30', url: 'https://wpscan.com/vulnerability/sample-2' }] }]
+        } };
+    }
+    refreshHealthViews();
+    if (opts.includes('vuln-open')) setTimeout(() => { const r = document.querySelector('#pane-checks .vrow'); toggleReveal(r, true); r.scrollIntoView({ block: 'start' }); }, 300);
+    if (opts.includes('theme-open')) toggleReveal(document.querySelector('#stack-rows [data-reveal]'), true);
+    if (opts.includes('plugin-open')) { const b = document.querySelector('#plugins-list .pl-main'); toggleReveal(b, true); }
+    if (opts.includes('menu')) setTimeout(() => setMenu(true), 50);
+    if (opts.includes('signal-open')) toggleReveal(document.querySelector('#pane-evidence .sig-main'), true);
+    if (opts.includes('scroll-end')) setTimeout(() => { $('body').scrollTop = 1e6; }, 4000);
+  }
+
+  // Sample popup-time check results, used only by the standalone preview.
+  const SAMPLE_DEEP = {
+    checkedAt: 0,
+    xmlrpc: { status: 405, enabled: true },
+    users: { status: 200, exposed: true, list: ['admin', 'editor'] },
+    readme: { status: 404, exposed: false, version: '' },
+    uploadsListing: { status: 403, exposed: false },
+    debugLog: { status: 404, exposed: false },
+    sitemap: { found: true, path: '/wp-sitemap.xml' },
+    robots: { found: true, sitemapLine: true, disallowAll: false }
   };
-}
 
-// ==========================================
-// 2. POPUP LOGIC & UTILITIES
-// ==========================================
-async function getHostIP(hostname) {
-  try {
-    const res = await fetch(`https://dns.google/resolve?name=${hostname}&type=A`);
-    const data = await res.json();
-    if (data.Answer && data.Answer.length > 0) {
-      return data.Answer.map(a => a.data).find(ip => ip.match(/^[0-9.]+$/)) || 'Unknown';
-    }
-  } catch (e) {}
-  return 'Unknown';
-}
-
-async function getNameservers(hostname) {
-  try {
-    const parts = hostname.split('.');
-    let apex = hostname;
-    if (parts.length > 2) apex = parts.slice(-2).join('.');
-    const res = await fetch(`https://dns.google/resolve?name=${apex}&type=NS`);
-    const data = await res.json();
-    if (data.Answer && data.Answer.length > 0) {
-      return data.Answer.map(a => a.data.replace(/\.$/, '')).slice(0, 2).join(', ');
-    }
-  } catch (e) {}
-  return 'Unknown';
-}
-
-async function checkWPCoreUpdate(currentVersion) {
-  if (!currentVersion || currentVersion === 'Unknown') return null;
-  try {
-    const res = await fetch('https://api.wordpress.org/core/version-check/1.7/');
-    const data = await res.json();
-    if (data && data.offers && data.offers.length > 0) {
-      const latest = data.offers[0].version;
-      const outdated = currentVersion !== latest && currentVersion.localeCompare(latest, undefined, { numeric: true, sensitivity: 'base' }) < 0;
-      return { outdated, latest };
-    }
-  } catch (e) {}
-  return null;
-}
-
-// Helper: Categorize plugin and return category icon SVG + color class
-function getPluginCategoryInfo(slug) {
-  const s = slug.toLowerCase();
-  
-  if (s.includes('access') || s.includes('ada') || s.includes('screen-reader')) {
-    return {
-      cls: 'cat-green',
-      svg: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><circle cx="12" cy="7.5" r="1.5" fill="currentColor"></circle><path d="M7 11h10M12 11v4M9.5 19.5l2.5-4.5 2.5 4.5"></path></svg>'
-    };
-  }
-  if (s.includes('config') || s.includes('tool') || s.includes('admin') || s.includes('manager') || s.includes('settings')) {
-    return {
-      cls: 'cat-blue',
-      svg: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>'
-    };
-  }
-  if (s.includes('parsely') || s.includes('wp-') || s.includes('wordpress')) {
-    return {
-      cls: 'cat-blue',
-      svg: '<svg viewBox="0 0 1000 1000" width="14" height="14" fill="currentColor"><path d="M500 0C223.8 0 0 223.8 0 500c0 276.2 223.8 500 500 500s500-223.8 500-500C1000 223.8 776.2 0 500 0zm0 34.6c257.1 0 465.4 208.3 465.4 465.4 0 94.7-28.3 182.7-76.7 256.4L640.4 274.6c18.5-.9 35.8-2.6 35.8-2.6 15.3-1.7 13.6-24.1-1.7-23.2 0 0-46.7 3.4-76.6 3.4-28.2 0-75.7-3.4-75.7-3.4-15.3-.9-17 21.5-1.7 23.2 0 0 16.5 1.7 33.2 2.6L465.2 537 363.3 274.6c18.5-.9 35.8-2.6 35.8-2.6 15.3-1.7 13.6-24.1-1.7-23.2 0 0-46.7 3.4-76.6 3.4-28.2 0-75.7-3.4-75.7-3.4-15.3-.9-17 21.5-1.7 23.2 0 0 16.5 1.7 33.2 2.6L129 780.8C65.5 704.9 34.6 606.8 34.6 500 34.6 242.9 242.9 34.6 500 34.6z"/></svg>'
-    };
-  }
-  if (s.includes('elastic') || s.includes('database') || s.includes('search') || s.includes('sql') || s.includes('query')) {
-    return {
-      cls: 'cat-purple',
-      svg: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2" ry="2"></rect><line x1="8" y1="9" x2="16" y2="9"></line><line x1="8" y1="13" x2="16" y2="13"></line><line x1="8" y1="17" x2="12" y2="17"></line></svg>'
-    };
-  }
-
-  // Default: Puzzle piece
-  return {
-    cls: 'cat-purple',
-    svg: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.5 11H19V7a2 2 0 0 0-2-2h-4V3.5a2.5 2.5 0 0 0-5 0V5H4a2 2 0 0 0-2 2v4h1.5a2.5 2.5 0 0 1 0 5H2v4a2 2 0 0 0 2 2h4v-1.5a2.5 2.5 0 0 1 5 0V21h4a2 2 0 0 0 2-2v-4h1.5a2.5 2.5 0 0 0 0-5z"></path></svg>'
-  };
-}
-
-// Format version display and identify fingerprints/hashes
-function formatVersionDisplay(version) {
-  if (!version) return { text: 'Version unknown', badge: 'Unknown', isHash: false };
-  if (version === 'REST API') return { text: 'REST API detected', badge: 'REST API', isHash: false };
-
-  // Check if version looks like a hash / fingerprint (e.g., vecf94842061bea03d54b or a hex string)
-  if (version.length > 15 || /^[0-9a-f]{8,}$/i.test(version.replace(/^v/i, ''))) {
-    return { text: `${version}`, badge: 'Unknown', isHash: true };
-  }
-
-  // Conventional semantic version
-  const cleaned = version.startsWith('v') ? version : 'v' + version;
-  return { text: cleaned, badge: 'Unknown', isHash: false };
-}
-
-// ==========================================
-// 3. MAIN EXECUTION
-// ==========================================
-document.addEventListener('DOMContentLoaded', async () => {
-  let reportData = null;
-  let activeFilter = 'all';
-
-  const els = {
-    loading: document.getElementById('loading'),
-    results: document.getElementById('results'),
-    refreshBtn: document.getElementById('refresh-btn'),
-    copyBtn: document.getElementById('copy-btn'),
-    downloadBtn: document.getElementById('download-txt-btn'),
-    rawCodeBtn: document.getElementById('raw-code-btn'),
-    toast: document.getElementById('toast'),
-    rawModal: document.getElementById('raw-modal'),
-    modalCloseBtn: document.getElementById('modal-close-btn'),
-    modalCopyBtn: document.getElementById('modal-copy-btn'),
-    modalDownloadBtn: document.getElementById('modal-download-btn'),
-    rawJsonContent: document.getElementById('raw-json-content'),
-    pluginSearch: document.getElementById('plugin-search'),
-    pluginsList: document.getElementById('plugins-list'),
-    serverIp: document.getElementById('server-ip')
-  };
-
-  function showToast(msg) {
-    if (!els.toast) return;
-    els.toast.textContent = msg;
-    els.toast.classList.remove('hidden');
-    clearTimeout(window.__toastTimeout);
-    window.__toastTimeout = setTimeout(() => {
-      els.toast.classList.add('hidden');
-    }, 2200);
-  }
-
-  function getPreviewMockData() {
+  // Sample report used only by the standalone preview.
+  function getSampleMockData() {
     return {
       isWP: true,
+      pageTitle: 'NASA',
+      faviconUrl: 'https://www.nasa.gov/wp-content/themes/nasa/assets/images/favicon.ico',
       url: 'https://www.nasa.gov/',
+      origin: 'https://www.nasa.gov',
       protocol: 'https:',
-      hostname: 'www.nasa.gov',
-      version: '7.0.7',
+      version: '7.0.8',
       theme: 'nasa',
-      themeVersion: '',
-      serverSoftware: 'nginx',
-      proxyCDN: 'None Detected',
-      phpVersion: 'Unknown',
-      cacheSystem: 'LiteSpeed Cache',
+      themeVersion: '1.1.1',
+      themeAuthor: 'Lone Rock Point',
+      themeStylesheet: 'https://www.nasa.gov/wp-content/themes/nasa/style.css',
+      isChildTheme: false,
+      parentTheme: '',
+      isUserLoggedIn: false,
+      pageBuilder: 'Gutenberg (Block Editor)',
+      hasGutenberg: true,
+      hostingPlatform: 'WordPress VIP',
+      ecommerce: 'None',
+      serverSoftware: 'nginx/1.26.1',
+      proxyCDN: 'WordPress VIP (Automattic)',
+      phpVersion: 'PHP/8.2.30',
+      cacheSystem: 'Server Cache',
       cacheHeaderStatus: 'HIT',
-      cacheDetail: 'x-litespeed-cache: hit',
+      cacheDetail: 'x-cache: HIT',
       ip: '192.0.66.108',
+      isp: 'Automattic, Inc',
+      location: '🇺🇸 San Francisco, California, US',
       dns: 'a12-64.akam.net, a5-66.akam.net',
-      updateCheck: null,
-      timestamp: new Date().toISOString(),
+      confidence: '98%',
+      signalScore: 7,
+      signals: {
+        api: { id: 'sig-api', detected: true, detail: 'https://www.nasa.gov/wp-json (24 namespaces)' },
+        linkHeader: { id: 'sig-link-header', detected: true, detail: '<https://www.nasa.gov/wp-json/>; rel="https://api.w.org/"' },
+        generator: { id: 'sig-generator', detected: true, detail: '<meta name="generator" content="WordPress 7.0.8">' },
+        wpContent: { id: 'sig-wp-content', detected: true, count: 42, detail: '42 assets found in /wp-content/' },
+        wpIncludes: { id: 'sig-wp-includes', detected: true, count: 18, detail: '18 assets found in /wp-includes/' },
+        linkRel: { id: 'sig-link-rel', detected: true, detail: '<link rel="https://api.w.org/" href="https://www.nasa.gov/wp-json/">' },
+        adminPaths: { id: 'sig-admin-paths', detected: true, detail: 'Verified public login endpoint /wp-login.php' }
+      },
       plugins: [
-        { slug: 'popup-maker', version: '1.18.4', method: 'Frontend Asset', evidence: 'https://www.nasa.gov/wp-content/plugins/popup-maker/assets/js/site.min.js?ver=1.18.4' },
-        { slug: 'gravityforms', version: '2.8.6', method: 'Frontend Asset', evidence: 'https://www.nasa.gov/wp-content/plugins/gravityforms/js/gravityforms.min.js?ver=2.8.6' },
-        { slug: 'nasa-blocks', version: '1.2.0', method: 'Frontend Asset', evidence: 'https://www.nasa.gov/wp-content/plugins/nasa-blocks/build/index.js?ver=1.2.0' },
-        { slug: 'wp-parsely', version: 'vecf94842061bea03d54b', method: 'Frontend Asset', evidence: 'https://www.nasa.gov/wp-content/plugins/wp-parsely/build/loader.js?ver=vecf94842061bea03d54b' },
-        { slug: 'accessibility-checker', version: '1.49.0', method: 'Frontend Asset', evidence: 'https://www.nasa.gov/wp-content/plugins/accessibility-checker/assets/js/frontend.js?ver=1.49.0' },
-        { slug: 'accessibility-checker-pro', version: '1.49.0', method: 'Frontend Asset', evidence: 'https://www.nasa.gov/wp-content/plugins/accessibility-checker-pro/assets/js/frontend.js?ver=1.49.0' },
-        { slug: 'gravity-forms-config', version: '1.0.0', method: 'Frontend Asset', evidence: 'https://www.nasa.gov/wp-content/plugins/gravity-forms-config/assets/script.js?ver=1.0.0' },
-        { slug: 'elasticpress', version: '4.5.12', method: 'REST API Namespace (/wp-json/elasticpress/v1)', evidence: 'https://www.nasa.gov/wp-json/elasticpress/v1' },
-        { slug: 'safe-svg', version: '2.2.4', method: 'Frontend Asset', evidence: 'https://www.nasa.gov/wp-content/plugins/safe-svg/assets/safe-svg.js?ver=2.2.4' },
-        { slug: 'wordpress-seo', version: '22.8', method: 'Frontend Asset', evidence: 'https://www.nasa.gov/wp-content/plugins/wordpress-seo/js/dist/frontend.js?ver=22.8' },
-        { slug: 'redirection', version: '5.4.2', method: 'REST API Namespace (/wp-json/redirection/v1)', evidence: 'https://www.nasa.gov/wp-json/redirection/v1' },
-        { slug: 'tablepress', version: '2.3.1', method: 'Frontend Asset', evidence: 'https://www.nasa.gov/wp-content/plugins/tablepress/assets/js/tablepress.js?ver=2.3.1' },
-        { slug: 'user-role-editor', version: '4.64.2', method: 'Frontend Asset', evidence: 'https://www.nasa.gov/wp-content/plugins/user-role-editor/js/ure.js?ver=4.64.2' },
-        { slug: 'simple-custom-post-order', version: '2.5.7', method: 'Frontend Asset', evidence: 'https://www.nasa.gov/wp-content/plugins/simple-custom-post-order/js/scporder.js?ver=2.5.7' },
-        { slug: 'wp-smushit', version: '3.16.3', method: 'Frontend Asset', evidence: 'https://www.nasa.gov/wp-content/plugins/wp-smushit/app/assets/js/smush.min.js?ver=3.16.3' },
-        { slug: 'regenerate-thumbnails', version: '', method: 'Frontend Asset', evidence: 'https://www.nasa.gov/wp-content/plugins/regenerate-thumbnails/regenerate-thumbnails.js' },
-        { slug: 'cookie-law-info', version: '3.2.4', method: 'Frontend Asset', evidence: 'https://www.nasa.gov/wp-content/plugins/cookie-law-info/public/js/cookie-law-info-public.js?ver=3.2.4' },
-        { slug: 'duplicate-post', version: '4.5', method: 'Frontend Asset', evidence: 'https://www.nasa.gov/wp-content/plugins/duplicate-post/duplicate-post.js?ver=4.5' },
-        { slug: 'wp-mail-smtp', version: '4.0.1', method: 'REST API Namespace (/wp-json/wp-mail-smtp/v1)', evidence: 'https://www.nasa.gov/wp-json/wp-mail-smtp/v1' },
-        { slug: 'broken-link-checker', version: '2.3.0', method: 'Frontend Asset', evidence: 'https://www.nasa.gov/wp-content/plugins/broken-link-checker/core/blc.js?ver=2.3.0' },
-        { slug: 'contact-form-7', version: '5.9.5', method: 'REST API Namespace (/wp-json/contact-form-7/v1)', evidence: 'https://www.nasa.gov/wp-json/contact-form-7/v1' },
-        { slug: 'jetpack', version: '13.4.1', method: 'REST API Namespace (/wp-json/jetpack/v4)', evidence: 'https://www.nasa.gov/wp-json/jetpack/v4' },
-        { slug: 'autoptimize', version: '3.1.11', method: 'Frontend Asset', evidence: 'https://www.nasa.gov/wp-content/plugins/autoptimize/classes/external/js/lazysizes.min.js?ver=3.1.11' },
-        { slug: 'advanced-custom-fields-pro', version: '6.2.9', method: 'REST API Namespace (/wp-json/acf/v3)', evidence: 'https://www.nasa.gov/wp-json/acf/v3' },
-        { slug: 'litespeed-cache', version: '6.2.0.1', method: 'Frontend Asset', evidence: 'https://www.nasa.gov/wp-content/plugins/litespeed-cache/assets/js/litespeed.js?ver=6.2.0.1' },
-        { slug: 'updraftplus', version: '', method: 'Frontend Asset', evidence: 'https://www.nasa.gov/wp-content/plugins/updraftplus/admin.js' },
-        { slug: 'wordfence', version: '7.11.5', method: 'REST API Namespace (/wp-json/wordfence/v1)', evidence: 'https://www.nasa.gov/wp-json/wordfence/v1' },
-        { slug: 'better-search-replace', version: '', method: 'Frontend Asset', evidence: 'https://www.nasa.gov/wp-content/plugins/better-search-replace/assets/js/bsr.js' }
+        { slug: 'tutor', name: 'Tutor LMS – eLearning and online course solution', version: '4.2.0', category: 'LMS', sourceTag: 'URL', evidence: 'http://tutorlms.wp/wp-content/plugins/tutor/assets/js/tutor.front.js' },
+        { slug: 'tutor-pro', name: 'Tutor LMS Pro', version: '4.2.0', category: 'LMS', sourceTag: 'URL', evidence: 'http://tutorlms.wp/wp-content/plugins/tutor-pro/assets/js/tutor-pro.js' },
+        { slug: 'kirki', name: 'Kirki Customizer Framework', version: '5.1.0', category: 'Framework', sourceTag: 'API', evidence: 'http://tutorlms.wp/wp-json/kirki/v1' },
+        { slug: 'accessibility-checker', name: 'Equalize Digital Accessibility Checker – WCAG, ADA, Section 508', version: '1.51.1', category: 'Accessibility', sourceTag: 'URL', evidence: 'https://www.nasa.gov/wp-content/plugins/accessibility-checker/assets/js/frontend.js' },
+        { slug: 'gravityforms', name: 'Gravityforms', version: '2.8.6', category: 'Forms', sourceTag: 'URL', evidence: 'https://www.nasa.gov/wp-content/plugins/gravityforms/js/gravityforms.min.js' },
+        { slug: 'gravity-forms-config', name: 'Gravity Forms Config', version: '', category: 'Forms', sourceTag: 'URL', evidence: 'https://www.nasa.gov/wp-content/plugins/gravity-forms-config/config.js' },
+        { slug: 'nasa-blocks', name: 'Nasa Blocks', version: '', category: 'Blocks', sourceTag: 'URL', evidence: 'https://www.nasa.gov/wp-content/plugins/nasa-blocks/build/index.js' },
+        { slug: 'nasa-hds-core-setup', name: 'Nasa Hds Core Setup', version: '', category: 'Plugin', sourceTag: 'URL', evidence: 'https://www.nasa.gov/wp-content/plugins/nasa-hds-core-setup/setup.js' },
+        { slug: 'popup-maker', name: 'Popup Maker – Boost Sales, Conversions, Optins, Popups', version: '1.25.0', category: 'Forms', sourceTag: 'URL', evidence: 'https://www.nasa.gov/wp-content/plugins/popup-maker/assets/js/site.min.js' },
+        { slug: 'schema-pro', name: 'Schema Pro', version: 'REST API', category: 'Schema', sourceTag: 'DOM', evidence: 'https://www.nasa.gov/wp-json/schema-pro/v1' },
+        { slug: 'seo-by-rank-math', name: 'Rank Math SEO – AI SEO Tools to Dominate SEO Rankings', version: '1.0.280', category: 'SEO', sourceTag: 'API', evidence: 'https://www.nasa.gov/wp-json/rankmath/v1' },
+        { slug: 'wp-parsely', name: 'Parse.ly Analytics', version: '3.14.0', category: 'Analytics', sourceTag: 'URL', evidence: 'https://www.nasa.gov/wp-content/plugins/wp-parsely/build/loader.js' },
+        { slug: 'litespeed-cache', name: 'LiteSpeed Cache', version: '6.2.0.1', category: 'Cache', sourceTag: 'HEADER', evidence: 'x-litespeed-cache: hit' },
+        { slug: 'wp-optimize', name: 'WP-Optimize', version: '3.7.0', category: 'Cache', sourceTag: 'DOM', evidence: '<!-- Cached by WP-Optimize -->' },
+        { slug: 'wordfence', name: 'Wordfence Security', version: '7.11.5', category: 'Security', sourceTag: 'API', evidence: 'https://www.nasa.gov/wp-json/wordfence/v1' },
+        { slug: 'safe-svg', name: 'Safe SVG', version: '2.2.4', category: 'Plugin', sourceTag: 'URL', evidence: 'https://www.nasa.gov/wp-content/plugins/safe-svg/assets/safe-svg.js' },
+        { slug: 'contact-form-7', name: 'Contact Form 7', version: '5.9.5', category: 'Forms', sourceTag: 'API', evidence: 'https://www.nasa.gov/wp-json/contact-form-7/v1' }
       ]
     };
   }
 
-  function renderEmptyState(type, detail) {
-    els.results.classList.add('hidden');
-    els.loading.classList.remove('hidden');
 
-    const scanLink = document.getElementById('header-scan-link');
-    if (scanLink) {
-      if (detail && detail.startsWith('http')) {
-        scanLink.textContent = detail;
-        scanLink.href = detail;
-        scanLink.title = detail;
-      } else if (detail) {
-        scanLink.textContent = detail;
-        scanLink.removeAttribute('href');
-      } else {
-        scanLink.textContent = type === 'internal_page' ? 'chrome://internal' : 'No target URL';
-        scanLink.removeAttribute('href');
-      }
-    }
-
-    if (type === 'internal_page') {
-      els.loading.innerHTML = `
-        <div class="not-wp-container">
-          <div class="not-wp-card">
-            <div class="not-wp-icon-badge">
-              <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--color-detected);"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><line x1="3" y1="9" x2="21" y2="9"></line><line x1="9" y1="21" x2="9" y2="9"></line></svg>
-            </div>
-            <h2 class="not-wp-title">Internal Browser Page</h2>
-            <span class="conf-badge badge-detected">Restricted Page</span>
-            <p class="not-wp-desc">
-              Browser security policies prevent extensions from executing diagnostics on internal pages (such as <code>chrome://</code>, <code>edge://</code>, or New Tab).
-            </p>
-            <div class="not-wp-checklist">
-              <div class="checklist-header">How to run diagnostics</div>
-              <div class="check-item">
-                <svg class="check-icon-info" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>
-                <span>Navigate to any public website in a standard tab</span>
-              </div>
-              <div class="check-item">
-                <svg class="check-icon-info" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>
-                <span>Click the WP Stack Report icon in your toolbar</span>
-              </div>
-              <div class="check-item">
-                <svg class="check-icon-info" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>
-                <span>WordPress core version, active theme &amp; plugin stack scan automatically</span>
-              </div>
-            </div>
-          </div>
-        </div>
-      `;
-    } else if (type === 'not_wordpress') {
-      els.loading.innerHTML = `
-        <div class="not-wp-container">
-          <div class="not-wp-card">
-            <div class="not-wp-icon-badge">
-              <svg viewBox="0 0 1000 1000" class="wp-gray-svg"><path d="M500 0C223.8 0 0 223.8 0 500c0 276.2 223.8 500 500 500s500-223.8 500-500C1000 223.8 776.2 0 500 0zm0 34.6c257.1 0 465.4 208.3 465.4 465.4 0 94.7-28.3 182.7-76.7 256.4L640.4 274.6c18.5-.9 35.8-2.6 35.8-2.6 15.3-1.7 13.6-24.1-1.7-23.2 0 0-46.7 3.4-76.6 3.4-28.2 0-75.7-3.4-75.7-3.4-15.3-.9-17 21.5-1.7 23.2 0 0 16.5 1.7 33.2 2.6L465.2 537 363.3 274.6c18.5-.9 35.8-2.6 35.8-2.6 15.3-1.7 13.6-24.1-1.7-23.2 0 0-46.7 3.4-76.6 3.4-28.2 0-75.7-3.4-75.7-3.4-15.3-.9-17 21.5-1.7 23.2 0 0 16.5 1.7 33.2 2.6L129 780.8C65.5 704.9 34.6 606.8 34.6 500 34.6 242.9 242.9 34.6 500 34.6z"/></svg>
-              <span class="not-wp-badge-sub">
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"></circle><line x1="15" y1="9" x2="9" y2="15"></line><line x1="9" y1="9" x2="15" y2="15"></line></svg>
-              </span>
-            </div>
-
-            <h2 class="not-wp-title">No WordPress Detected</h2>
-            <span class="conf-badge badge-neutral">Non-WordPress Site</span>
-            
-            <p class="not-wp-desc">
-              We inspected the page headers, DOM signatures, and script paths, but found no evidence of an active WordPress installation.
-            </p>
-
-            <div class="not-wp-checklist">
-              <div class="checklist-header">Diagnostic Checks Performed</div>
-              <div class="check-item">
-                <svg class="check-icon-no" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"></circle><line x1="15" y1="9" x2="9" y2="15"></line><line x1="9" y1="9" x2="15" y2="15"></line></svg>
-                <span>No <code>/wp-content/</code> or <code>/wp-includes/</code> asset paths</span>
-              </div>
-              <div class="check-item">
-                <svg class="check-icon-no" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"></circle><line x1="15" y1="9" x2="9" y2="15"></line><line x1="9" y1="9" x2="15" y2="15"></line></svg>
-                <span>No WordPress generator meta tag identified</span>
-              </div>
-              <div class="check-item">
-                <svg class="check-icon-no" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"></circle><line x1="15" y1="9" x2="9" y2="15"></line><line x1="9" y1="9" x2="15" y2="15"></line></svg>
-                <span>No public <code>/wp-json</code> REST API endpoints reachable</span>
-              </div>
-            </div>
-
-            <div class="not-wp-actions">
-              <button class="btn-rescan" id="rescan-empty-btn">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
-                Rescan Page
-              </button>
-            </div>
-          </div>
-        </div>
-      `;
-      const rescanBtn = document.getElementById('rescan-empty-btn');
-      if (rescanBtn) rescanBtn.addEventListener('click', runDiagnostics);
-    } else {
-      els.loading.innerHTML = `
-        <div class="not-wp-container">
-          <div class="not-wp-card">
-            <div class="not-wp-icon-badge">
-              <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--color-issue);"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
-            </div>
-            <h2 class="not-wp-title">Diagnostics Incomplete</h2>
-            <span class="conf-badge badge-error">Inspection Issue</span>
-            <p class="not-wp-desc">${detail || 'An unexpected issue occurred while analyzing this tab.'}</p>
-            <div class="not-wp-actions">
-              <button class="btn-rescan" id="rescan-empty-btn">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
-                Retry Diagnostics
-              </button>
-            </div>
-          </div>
-        </div>
-      `;
-      const rescanBtn = document.getElementById('rescan-empty-btn');
-      if (rescanBtn) rescanBtn.addEventListener('click', runDiagnostics);
-    }
-  }
-
-  async function runDiagnostics() {
-    reportData = null;
-    els.loading.innerHTML = `
-      <div class="spinner"></div>
-      <p class="state-title">Running Diagnostics...</p>
-      <span class="state-desc">Inspecting headers, DOM signatures &amp; REST API namespaces</span>
-    `;
-    els.loading.classList.remove('hidden');
-    els.results.classList.add('hidden');
-    els.refreshBtn.classList.add('spinning');
-
-    let currentTabUrl = '';
-
-    try {
-      if (!window.chrome || !chrome.tabs || !chrome.tabs.query) {
-        // Fallback for offline preview, screenshots, and direct browser inspection
-        reportData = getPreviewMockData();
-        renderDashboard();
-        return;
-      }
-
-      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-      if (!tab || !tab.url || tab.url.startsWith('chrome://') || tab.url.startsWith('edge://') || tab.url.startsWith('about:') || tab.url.startsWith('chrome-extension://')) {
-        renderEmptyState('internal_page', tab ? tab.url : '');
-        return;
-      }
-
-      currentTabUrl = tab.url;
-
-      // Update header scan link immediately
-      const scanLink = document.getElementById('header-scan-link');
-      if (scanLink) {
-        scanLink.textContent = tab.url;
-        scanLink.href = tab.url;
-        scanLink.title = tab.url;
-      }
-
-      const res = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: detectWordPress });
-      const data = res && res[0] ? res[0].result : null;
-
-      if (!data || !data.isWP) {
-        renderEmptyState('not_wordpress', tab.url);
-        return;
-      }
-
-      const urlObj = new URL(tab.url);
-      data.hostname = urlObj.hostname;
-
-      // Async DNS & version fetches
-      const [ip, ns, updateCheck] = await Promise.all([
-        getHostIP(data.hostname),
-        getNameservers(data.hostname),
-        checkWPCoreUpdate(data.version)
-      ]);
-
-      data.ip = ip;
-      data.dns = ns;
-      data.updateCheck = updateCheck;
-      data.timestamp = new Date().toISOString();
-
-      reportData = data;
-      renderDashboard();
-    } catch (e) {
-      const errMsg = e && e.message ? e.message : String(e);
-      if (errMsg.includes('internal browser pages') || errMsg.includes('Cannot access a chrome://') || errMsg.includes('The extensions gallery cannot be scripted')) {
-        renderEmptyState('internal_page', currentTabUrl);
-      } else if (errMsg.includes('Not a WordPress site')) {
-        renderEmptyState('not_wordpress', currentTabUrl);
-      } else {
-        renderEmptyState('error', errMsg);
-      }
-    } finally {
-      els.refreshBtn.classList.remove('spinning');
-    }
-  }
-
-  function renderDashboard() {
-    els.loading.classList.add('hidden');
-    els.results.classList.remove('hidden');
-    const d = reportData;
-
-    // Header Scan Link
-    const scanLink = document.getElementById('header-scan-link');
-    if (scanLink) {
-      scanLink.textContent = d.url;
-      scanLink.href = d.url;
-      scanLink.title = d.url;
-    }
-
-    // Overview Bar
-    document.getElementById('summary-status').textContent = 'Active';
-    document.getElementById('summary-version').textContent = d.version !== 'Unknown' ? 'v' + d.version : 'Unknown';
-    document.getElementById('summary-plugins').textContent = `${d.plugins.length} Active`;
-
-    // Card 1: WordPress Environment & Theme
-    const envUrl = document.getElementById('env-url');
-    const envUrlText = document.getElementById('env-url-text');
-    if (envUrl && envUrlText) {
-      envUrl.href = d.url;
-      envUrl.title = d.url;
-      envUrlText.textContent = d.url;
-    }
-
-    const envHttps = document.getElementById('env-https');
-    if (envHttps) {
-      envHttps.innerHTML = d.protocol === 'https:'
-        ? '<span class="conf-badge badge-confirmed"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg> Passed (TLS)</span>'
-        : '<span class="conf-badge badge-error">Warning: HTTP</span>';
-    }
-
-    const themeLink = document.getElementById('theme-link');
-    if (themeLink) {
-      themeLink.textContent = d.theme;
-      themeLink.href = `https://wordpress.org/themes/${d.theme}/`;
-    }
-
-    const themeVer = document.getElementById('theme-version');
-    if (themeVer) {
-      themeVer.textContent = d.themeVersion ? 'v' + d.themeVersion : 'Unknown';
-      themeVer.className = 'conf-badge ' + (d.themeVersion ? 'badge-detected' : 'badge-neutral');
-    }
-
-    // Card 2: Server, Proxy & DNS
-    const proxyEl = document.getElementById('server-proxy');
-    if (proxyEl) {
-      proxyEl.textContent = d.proxyCDN;
-      proxyEl.className = 'conf-badge ' + (d.proxyCDN !== 'None Detected' ? 'badge-rest' : 'badge-neutral');
-    }
-
-    document.getElementById('server-software').textContent = d.serverSoftware;
-    
-    const phpEl = document.getElementById('server-php');
-    if (phpEl) {
-      phpEl.textContent = d.phpVersion;
-      phpEl.className = 'conf-badge ' + (d.phpVersion !== 'Unknown' ? 'badge-detected' : 'badge-neutral');
-    }
-
-    const ipEl = document.getElementById('server-ip');
-    if (ipEl) {
-      ipEl.textContent = d.ip;
-    }
-
-    const dnsEl = document.getElementById('server-dns');
-    if (dnsEl) {
-      dnsEl.innerHTML = d.dns.replace(/, /g, '<br>');
-    }
-
-    const cacheEl = document.getElementById('cache-header-status');
-    if (cacheEl) {
-      let displayText = d.cacheHeaderStatus;
-      if (d.cacheSystem && d.cacheSystem !== 'None Detected') {
-        if (d.cacheSystem === 'WP-Optimize') {
-          displayText = d.cacheHeaderStatus === 'Saving to Cache' ? 'WP-Optimize: Saving' : `WP-Optimize: ${d.cacheHeaderStatus}`;
-        } else if (d.cacheSystem === 'LiteSpeed Cache') {
-          displayText = `LiteSpeed: ${d.cacheHeaderStatus}`;
-        } else if (d.cacheSystem === 'WP Super Cache') {
-          displayText = `SuperCache: ${d.cacheHeaderStatus}`;
-        } else if (d.cacheSystem === 'W3 Total Cache') {
-          displayText = `W3TC: ${d.cacheHeaderStatus}`;
-        } else if (d.cacheSystem === 'Cloudflare') {
-          displayText = `Cloudflare: ${d.cacheHeaderStatus}`;
-        } else if (d.cacheSystem === 'WP Rocket') {
-          displayText = 'WP Rocket: Active';
-        } else if (d.cacheSystem.length <= 14 && d.cacheHeaderStatus !== 'Unknown') {
-          displayText = `${d.cacheSystem}: ${d.cacheHeaderStatus}`;
-        }
-      }
-      cacheEl.textContent = displayText;
-
-      if (d.cacheDetail) {
-        cacheEl.title = `Cache Engine: ${d.cacheSystem}\nDetail: ${d.cacheDetail}`;
-      } else if (d.cacheSystem && d.cacheSystem !== 'None Detected') {
-        cacheEl.title = `Cache Engine: ${d.cacheSystem}`;
-      } else {
-        cacheEl.title = 'No caching headers or signatures detected';
-      }
-
-      const statusUpper = (d.cacheHeaderStatus || '').toUpperCase();
-      let badgeClass = 'badge-neutral';
-      if (statusUpper === 'HIT' || statusUpper === 'CACHED' || statusUpper === 'ACTIVE') {
-        badgeClass = 'badge-confirmed';
-      } else if (statusUpper.includes('SAVING') || statusUpper === 'MISS' || statusUpper === 'STALE' || statusUpper === 'EXPIRED') {
-        badgeClass = 'badge-inferred';
-      } else if (statusUpper === 'DYNAMIC' || statusUpper === 'REVALIDATED') {
-        badgeClass = 'badge-detected';
-      } else {
-        badgeClass = 'badge-neutral';
-      }
-      cacheEl.className = `conf-badge ${badgeClass}`;
-    }
-
-    const cacheSysEl = document.getElementById('cache-system');
-    if (cacheSysEl) {
-      cacheSysEl.textContent = d.cacheSystem;
-    }
-
-    // Right Column: Plugin Inventory
-    document.getElementById('plugins-count-header').textContent = d.plugins.length;
-    const allCount = document.getElementById('filter-all-count');
-    if (allCount) allCount.textContent = d.plugins.length;
-
-    renderFilteredPlugins();
-  }
-
-  function renderFilteredPlugins() {
-    if (!reportData) return;
-    const list = els.pluginsList;
-    list.innerHTML = '';
-
-    const term = els.pluginSearch.value.toLowerCase().trim();
-
-    let filtered = reportData.plugins.filter(p => {
-      // Search match
-      const slugMatch = p.slug.toLowerCase().includes(term);
-      const verMatch = (p.version || '').toLowerCase().includes(term);
-      const methodMatch = (p.method || '').toLowerCase().includes(term);
-      const matchesSearch = !term || slugMatch || verMatch || methodMatch;
-
-      // Filter chip match
-      let matchesFilter = true;
-      if (activeFilter === 'versioned') {
-        matchesFilter = p.version && p.version !== 'Unknown' && p.version !== 'REST API';
-      } else if (activeFilter === 'unknown') {
-        matchesFilter = !p.version || p.version === 'Unknown';
-      } else if (activeFilter === 'rest') {
-        matchesFilter = p.version === 'REST API' || (p.method && p.method.includes('REST'));
-      }
-
-      return matchesSearch && matchesFilter;
-    });
-
-    if (filtered.length === 0) {
-      list.innerHTML = `<li class="empty-state">No plugins matching current search &amp; filter</li>`;
-      return;
-    }
-
-    filtered.forEach(p => {
-      const verInfo = formatVersionDisplay(p.version);
-      const cat = getPluginCategoryInfo(p.slug);
-      const isRest = p.version === 'REST API' || (p.method && p.method.includes('REST'));
-      const badgeCls = isRest ? 'badge-rest' : 'badge-neutral';
-      const badgeText = isRest ? 'REST API' : 'Unknown';
-
-      const li = document.createElement('li');
-      li.className = 'plugin-row-item';
-
-      li.innerHTML = `
-        <div class="plugin-row-header" role="button" tabindex="0" aria-expanded="false">
-          <div class="plugin-row-left">
-            <div class="plugin-cat-icon ${cat.cls}">
-              ${cat.svg}
-            </div>
-            <div class="plugin-names-wrap">
-              <span class="plugin-slug" title="${p.slug}">${p.slug}</span>
-              <span class="plugin-ver-sub">${verInfo.text}</span>
-            </div>
-          </div>
-          <div class="plugin-row-right">
-            <span class="conf-badge ${badgeCls}">${badgeText}</span>
-            <svg class="row-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>
-          </div>
-        </div>
-        <div class="plugin-row-details">
-          <div class="detail-line"><span class="detail-lbl">Detection Method:</span> ${p.method || 'Frontend Asset Inspection'}</div>
-          ${p.evidence ? `<div class="detail-line"><span class="detail-lbl">Evidence / Path:</span> <span class="mono">${p.evidence}</span></div>` : ''}
-          <div class="detail-line">
-            <a href="https://wordpress.org/plugins/${p.slug}/" class="detail-link" target="_blank" rel="noopener noreferrer">
-              Open on WordPress.org
-              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>
-            </a>
-          </div>
-        </div>
-      `;
-
-      // Expand / Collapse interaction
-      const rowHeader = li.querySelector('.plugin-row-header');
-      rowHeader.addEventListener('click', () => {
-        const isOpen = li.classList.toggle('open');
-        rowHeader.setAttribute('aria-expanded', isOpen);
-      });
-      rowHeader.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter' || e.key === ' ') {
-          e.preventDefault();
-          const isOpen = li.classList.toggle('open');
-          rowHeader.setAttribute('aria-expanded', isOpen);
-        }
-      });
-
-      list.appendChild(li);
-    });
-  }
-
-  // Filter Chips Click Handling
-  document.querySelectorAll('.filter-chip').forEach(btn => {
-    btn.addEventListener('click', () => {
-      document.querySelectorAll('.filter-chip').forEach(c => c.classList.remove('active'));
-      btn.classList.add('active');
-      activeFilter = btn.getAttribute('data-filter') || 'all';
-      renderFilteredPlugins();
-    });
-  });
-
-  // Search Input Handling
-  els.pluginSearch.addEventListener('input', () => {
-    renderFilteredPlugins();
-  });
-
-  // Click to copy Host IP
-  if (els.serverIp) {
-    els.serverIp.addEventListener('click', () => {
-      const ip = els.serverIp.textContent;
-      if (ip && ip !== 'Unknown') {
-        navigator.clipboard.writeText(ip).then(() => {
-          showToast(`Copied IP: ${ip}`);
-        });
-      }
-    });
-  }
-
-  // Plain Text Report Generator
-  function generateTXT() {
-    const d = reportData;
-    if (!d) return '';
-    
-    return `# WordPress Stack Report
-Generated: ${d.timestamp}
-Site URL: ${d.url}
-
-## ENVIRONMENT
-WordPress Core: ${d.version}
-HTTPS: ${d.protocol === 'https:' ? 'Passed (TLS)' : 'Warning: HTTP'}
-Active Theme: ${d.theme} (${d.themeVersion ? 'v' + d.themeVersion : 'Unknown'})
-Environment Type: Frontend Extracted
-
-## SERVER, PROXY & DNS
-Proxy / CDN: ${d.proxyCDN}
-Web Server: ${d.serverSoftware}
-PHP Version: ${d.phpVersion}
-Host IP: ${d.ip}
-Nameservers: ${d.dns}
-Cache Status: ${d.cacheHeaderStatus}${d.cacheSystem && d.cacheSystem !== 'None Detected' ? ` (${d.cacheSystem})` : ''}
-${d.cacheDetail ? `Cache Detail: ${d.cacheDetail}\n` : ''}
-## DETECTED PLUGINS (${d.plugins.length})
-${d.plugins.map(p => `- ${p.slug} (${p.version || 'Version unknown'}) [${p.method || 'Frontend'}]`).join('\n')}
-`;
-  }
-
-  // Actions
-  els.refreshBtn.addEventListener('click', runDiagnostics);
-
-  els.copyBtn.addEventListener('click', () => {
-    if (!reportData) return;
-    navigator.clipboard.writeText(generateTXT()).then(() => {
-      showToast('Support summary copied to clipboard!');
-    }).catch(() => {
-      showToast('Failed to copy report');
-    });
-  });
-
-  els.downloadBtn.addEventListener('click', () => {
-    if (!reportData) return;
-    const blob = new Blob([generateTXT()], { type: 'text/plain' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `wp-stack-report-${reportData.hostname || 'site'}.txt`;
-    a.click();
-    URL.revokeObjectURL(url);
-    showToast('Downloaded report TXT');
-  });
-
-  // Raw Diagnostic Modal Handlers
-  function openRawModal() {
-    if (!reportData) return;
-    els.rawJsonContent.textContent = JSON.stringify(reportData, null, 2);
-    els.rawModal.classList.remove('hidden');
-  }
-
-  function closeRawModal() {
-    els.rawModal.classList.add('hidden');
-  }
-
-  els.rawCodeBtn.addEventListener('click', openRawModal);
-  els.modalCloseBtn.addEventListener('click', closeRawModal);
-  els.rawModal.addEventListener('click', (e) => {
-    if (e.target === els.rawModal) closeRawModal();
-  });
-
-  els.modalCopyBtn.addEventListener('click', () => {
-    if (!reportData) return;
-    navigator.clipboard.writeText(JSON.stringify(reportData, null, 2)).then(() => {
-      showToast('Raw JSON copied to clipboard!');
-    });
-  });
-
-  els.modalDownloadBtn.addEventListener('click', () => {
-    if (!reportData) return;
-    const blob = new Blob([JSON.stringify(reportData, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `wp-stack-report-${reportData.hostname || 'site'}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
-    showToast('Downloaded JSON report');
-  });
-
+  // ------------------------------------------------------------------ boot
+  applyTheme(storedTheme());
+  $('app-version').textContent = APP_VERSION ? `WPScout ${APP_VERSION}` : 'WPScout';
+  wire();
   runDiagnostics();
-});
+})();

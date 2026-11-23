@@ -4,3 +4,5 @@ Thumbs.db
 *.zip
 *.crx
 node_modules/
+dist/
+backup/

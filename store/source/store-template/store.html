@@ -1,0 +1,66 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<style>
+@font-face { font-family: Geist; src: url("fonts/Geist-Variable.woff2") format("woff2"); font-weight: 100 900; }
+@font-face { font-family: "Geist Mono"; src: url("fonts/GeistMono-Variable.woff2") format("woff2"); font-weight: 100 900; }
+:root { --bg:#F6F7F9; --ink:#12151B; --ink2:#485063; --ink3:#646B7D; --line:#E3E6EC; --accent:#0284C7; --brand-ink:#FFFFFF; }
+* { box-sizing: border-box; margin: 0; }
+html, body { width: 100%; height: 100%; }
+body { font-family: Geist, sans-serif; color: var(--ink); background: var(--bg); -webkit-font-smoothing: antialiased; overflow: hidden; }
+.frame { position: relative; width: 1280px; height: 800px; display: grid; grid-template-columns: 1fr 560px; align-items: center; padding: 0 72px 0 88px; gap: 48px; }
+.frame.dark { color: var(--ink); --bg:#0C0E12; --ink:#ECEEF3; --ink2:#AEB4C2; --ink3:#8D94A5; --line:#262B35; background: var(--bg); }
+.brand { display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: 18px; letter-spacing: -.01em; margin-bottom: 40px; }
+.brand img { width: 30px; height: 30px; border-radius: 22%; }
+h1 { font-size: 52px; line-height: 1.06; letter-spacing: -.035em; font-weight: 600; text-wrap: balance; max-width: 12ch; }
+p.sub { margin-top: 20px; font-size: 20px; line-height: 1.5; color: var(--ink2); max-width: 30ch; }
+ul.pts { list-style: none; padding: 0; margin-top: 32px; display: grid; gap: 12px; font-size: 16px; color: var(--ink2); }
+ul.pts li { display: flex; gap: 10px; align-items: center; }
+ul.pts li::before { content: ""; width: 18px; height: 18px; flex: none; border-radius: 50%; background: var(--accent) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m7 12.5 3.2 3.2L17 9'/%3E%3C/svg%3E") center/14px no-repeat; }
+.stage { position: relative; height: 800px; display: flex; flex-direction: column; justify-content: center; align-items: flex-end; }
+.toolbar { width: 504px; height: 48px; border-radius: 14px 14px 0 0; background: #DEE1E6; display: flex; align-items: center; gap: 10px; padding: 0 12px; }
+.dark .toolbar { background: #35363A; }
+.omni { flex: 1; height: 32px; border-radius: 16px; background: #fff; display: flex; align-items: center; padding: 0 14px; font-size: 14px; color: #3C4043; }
+.dark .omni { background: #202124; color: #E8EAED; }
+.ext { position: relative; width: 32px; height: 32px; border-radius: 50%; background: rgba(0,0,0,.08); display: grid; place-items: center; }
+.dark .ext { background: rgba(255,255,255,.12); }
+.ext img { width: 16px; height: 16px; }
+.badge { position: absolute; right: -3px; bottom: 1px; min-width: 18px; height: 14px; padding: 0 4px; border-radius: 4px; background: #14171B; color: #fff; font: 700 10px/14px Geist, sans-serif; text-align: center; }
+.badge { background: #14171B; color: #FFFFFF; box-shadow: 0 0 0 1.5px #fff; }
+.shot { display: block; width: 504px; height: 720px; border-radius: 0 0 14px 14px; box-shadow: 0 1px 2px rgba(18,21,27,.06), 0 24px 60px -16px rgba(18,21,27,.28); }
+.shot.solo { border-radius: 14px; }
+.dark .shot { box-shadow: 0 1px 2px rgba(0,0,0,.5), 0 24px 60px -12px rgba(0,0,0,.8); }
+.pair { display: flex; gap: 24px; align-items: center; }
+.pair img { width: 372px; height: 531px; border-radius: 14px; box-shadow: 0 24px 60px -12px rgba(0,0,0,.8); }
+.frame.wide { grid-template-columns: 1fr 764px; padding: 0 64px 0 80px; }
+/* promo tiles */
+.tile { width: 440px; height: 280px; padding: 36px 36px; display: flex; flex-direction: column; justify-content: space-between; background: var(--accent); color: var(--brand-ink); position: relative; overflow: hidden; }
+.tile .brand { color: var(--brand-ink); margin: 0; font-size: 22px; }
+.tile .brand img { width: 44px; height: 44px; border-radius: 10px; box-shadow: 0 0 0 1px rgba(255,255,255,.25); }
+.tile h2 { font-size: 28px; line-height: 1.12; letter-spacing: -.03em; font-weight: 600; max-width: 13ch; }
+.tile .ring { position: absolute; right: -70px; bottom: -90px; width: 260px; height: 260px; border-radius: 50%; border: 34px solid rgba(255,255,255,.12); }
+.tile .ring::after { content: ""; position: absolute; inset: 62px; border-radius: 50%; background: rgba(255,255,255,.12); }
+.marquee { width: 1400px; height: 560px; display: grid; grid-template-columns: 1fr 640px; align-items: center; padding: 0 0 0 96px; background: var(--bg); position: relative; overflow: hidden; }
+.marquee .crop { position: relative; height: 560px; overflow: hidden; }
+.marquee .crop .toolbar { position: absolute; top: 64px; left: 40px; }
+.marquee .crop .shot { position: absolute; top: 112px; left: 40px; }
+</style></head>
+<body><div id="root"></div>
+<script>
+const V = new URLSearchParams(location.search).get('v');
+const ICON16 = 'brand/active-32.png', ICON128 = 'brand/logo.svg';
+const P = "pop/";
+const tb = (n = 13) => `<div class="toolbar"><div class="omni">wordpress.org/news</div><div class="ext"><img src="ICON16"><span class="badge">${n}</span></div></div>`;
+const brand = '<div class="brand"><img src="ICON128">WPScout</div>';
+const pts = (a) => `<ul class="pts">${a.map(x => `<li>${x}</li>`).join('')}</ul>`;
+const S = {
+  s1: `<div class="frame">${'<div>' + brand}<h1>See how any WordPress site is built</h1><p class="sub">Open WPScout on a site to get its theme, plugins, host and health in one view.</p>${pts(['WordPress version and detection confidence', 'Health summary: updates, vulnerabilities, security and SEO', 'Plugin count on the toolbar icon'])}</div><div class="stage">${tb()}<img class="shot" src="${P}overview.png"></div></div>`,
+  s2: `<div class="frame">${'<div>' + brand}<h1>Every plugin, with its version</h1><p class="sub">Search and filter what the page loads, and see which plugins have an update on WordPress.org.</p>${pts(['Versions read from asset URLs', 'Outdated plugins show the version available', 'Icons and names from WordPress.org'])}</div><div class="stage">${tb()}<img class="shot" src="${P}plugins.png"></div></div>`,
+  s3: `<div class="frame">${'<div>' + brand}<h1>Hosting, content and the tech stack</h1><p class="sub">Server, cache and DNS, how much content the site has, and the analytics and libraries it runs.</p>${pts(['Web server, PHP, CDN and live cache status', 'Posts, pages, latest post and multisite', 'Analytics and tag manager IDs'])}</div><div class="stage">${tb()}<img class="shot" src="${P}stack.png"></div></div>`,
+  s4: `<div class="frame">${'<div>' + brand}<h1>Health checks in one tab</h1><p class="sub">Updates, plugin health, known vulnerabilities, security, performance and SEO. They run only when you open WPScout.</p>${pts(['Plugins closed on WordPress.org, stale or untested', 'Known vulnerabilities, with your own free API key', 'Exposed users, debug log, headers and PHP support'])}</div><div class="stage">${tb()}<img class="shot" src="${P}checks2.png"></div></div>`,
+  s5: `<div class="frame dark wide">${'<div>' + brand}<h1>Light or dark, your choice</h1><p class="sub">Follows your system theme, or pick one from the menu.</p></div><div class="pair"><img src="${P}dark-overview.png"><img src="${P}dark-checks.png"></div></div>`,
+  small: `<div class="tile"><div class="ring"></div><div class="brand"><img src="ICON128" style="width:48px;height:48px;border-radius:22%;box-shadow:0 0 0 2px rgba(255,255,255,.7)">WPScout</div><h2>See how any<br>WordPress site<br>is built</h2></div>`,
+  marquee: `<div class="marquee"><div>${brand}<h1 style="font-size:56px">See how any WordPress site is built</h1><p class="sub">Theme, plugins and updates, known vulnerabilities, hosting, tech stack, and security and SEO checks.</p></div><div class="crop">${tb()}<img class="shot" src="${P}overview.png"></div></div>`
+};
+document.getElementById('root').innerHTML = S[V].replaceAll('ICON16', ICON16).replaceAll('ICON128', ICON128);
+</script>
+</body></html>
