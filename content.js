@@ -635,6 +635,7 @@
   const securityHeaders = {};
   let headersChecked = false;
   let xRobotsTag = '';
+  let delivery = null;
 
   const pageHeaders = await headersPromise;
   try {
@@ -646,6 +647,16 @@
       securityHeaders[h] = v ? v.slice(0, 300) : null;
     }
     xRobotsTag = response.headers.get('x-robots-tag') || '';
+    // Delivery: compression and caching headers of the page itself.
+    const hv = (n, max = 200) => (response.headers.get(n) || '').slice(0, max);
+    delivery = {
+      encoding: hv('content-encoding', 40).toLowerCase(),
+      cacheControl: hv('cache-control'),
+      age: hv('age', 20),
+      serverTiming: hv('server-timing', 300),
+      expires: hv('expires', 60),
+      lastModified: hv('last-modified', 60)
+    };
 
     // --- Signal 2: wp-json in Link Header ---
     const linkHeader = response.headers.get('link');
@@ -1122,10 +1133,46 @@
     return m ? { siteId: Number(m[1]) } : null;
   }
 
-  let tech = [], seo = null, multisite = null;
+  // --- Multilingual: translation plugin from its assets or markup, languages from hreflang links
+  function detectLanguages() {
+    const urls = Array.from(document.querySelectorAll('script[src], link[href]')).map((e) => e.src || e.href || '').join(' ');
+    const gen = Array.from(document.querySelectorAll('meta[name="generator" i]')).map((m) => m.getAttribute('content') || '').join(' ');
+    const has = (sel) => { try { return !!document.querySelector(sel); } catch (e) { return false; } };
+    const RULES = [
+      ['WPML', () => /\/sitepress-multilingual-cms\//i.test(urls) || /\bWPML\b/.test(gen) || has('.wpml-ls, .wpml-ls-statics-footer, [class*="wpml-ls-item"]')],
+      ['Polylang', () => /\/polylang(?:-pro)?\//i.test(urls) || has('li.lang-item, .pll-parent-menu-item, select[name^="lang_choice"]')],
+      ['TranslatePress', () => /\/translatepress-multilingual\//i.test(urls) || has('[data-trp-translate-id], .trp-language-switcher, #trp-floater-ls')],
+      ['Weglot', () => /cdn\.weglot\.(?:com|us)|\/weglot\/(?:dist|app)\//i.test(urls) || has('.weglot-container, aside.country-selector.weglot-dropdown')],
+      ['GTranslate', () => /\/gtranslate\/|cdn\.gtranslate\.net/i.test(urls) || has('.gtranslate_wrapper, .gt_switcher')]
+    ];
+    const hit = RULES.find(([, test]) => test());
+    const codes = [];
+    let xDefault = false;
+    document.querySelectorAll('link[rel="alternate"][hreflang]').forEach((l) => {
+      const c = (l.getAttribute('hreflang') || '').trim();
+      if (!c) return;
+      if (c.toLowerCase() === 'x-default') { xDefault = true; return; }
+      if (!codes.includes(c) && codes.length < 40) codes.push(c);
+    });
+    return { plugin: hit ? hit[0] : '', hreflang: codes, xDefault, lang: document.documentElement.getAttribute('lang') || '' };
+  }
+
+  // --- Block theme vs classic: block themes render templates inside .wp-site-blocks
+  function detectThemeType() {
+    const gs = document.getElementById('global-styles-inline-css');
+    const gsText = gs ? (gs.textContent || '').slice(0, 60000) : '';
+    const themeJson = /--wp--style--global--content-size|--wp--custom--/.test(gsText);
+    if (document.querySelector('.wp-site-blocks')) return { type: 'block', themeJson: true, evidence: '.wp-site-blocks template wrapper' };
+    if (document.querySelector('.wp-block-template-part')) return { type: 'block', themeJson: true, evidence: 'Block template parts' };
+    return { type: 'classic', themeJson, evidence: themeJson ? 'No block template wrapper; theme.json layout settings in global styles' : 'No block template wrapper' };
+  }
+
+  let tech = [], seo = null, multisite = null, languages = null, themeType = null;
   try { tech = detectTech(); } catch (e) {}
   try { seo = readSeo(); } catch (e) {}
   try { multisite = detectMultisite(); } catch (e) {}
+  try { languages = detectLanguages(); } catch (e) {}
+  try { themeType = isWP ? detectThemeType() : null; } catch (e) {}
 
   return {
     isWP,
@@ -1162,6 +1209,9 @@
     tech,
     seo,
     multisite,
+    languages,
+    themeType,
+    delivery,
     securityHeaders: headersChecked ? securityHeaders : null
   };
 }
@@ -1179,20 +1229,20 @@
     const restRoot = plainRest ? null : apiHref.replace(/\/?$/, '/');
     const rest = (route, query) => (restRoot ? `${restRoot}${route}?${query}` : `${base}?rest_route=/${route}&${query}`);
     const at = (path) => base + path.replace(/^\//, '');
-    const get = async (url, limit) => {
+    const get = async (url, limit, wait = 3000) => {
       const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), 3000);
+      const timer = setTimeout(() => ctrl.abort(), wait);
       try {
         const r = await fetch(url, { credentials: 'omit', cache: 'no-store', redirect: 'follow', signal: ctrl.signal });
         const text = (await r.text()).slice(0, limit);
-        return { status: r.status, ok: r.ok, type: r.headers.get('content-type') || '', total: r.headers.get('x-wp-total'), text };
+        return { status: r.status, ok: r.ok, type: r.headers.get('content-type') || '', total: r.headers.get('x-wp-total'), text, url: r.url, redirected: r.redirected };
       } catch (e) {
-        return { status: 0, ok: false, type: '', text: '', error: e && e.name === 'AbortError' ? 'timeout' : 'failed' };
+        return { status: 0, ok: false, type: '', text: '', url: '', redirected: false, error: e && e.name === 'AbortError' ? 'timeout' : 'failed' };
       } finally {
         clearTimeout(timer);
       }
     };
-    const [xmlrpc, users, readme, uploads, debugLog, robots, smWp, smIndex, smPlain, posts, pages, products] = await Promise.all([
+    const [xmlrpc, users, readme, uploads, debugLog, robots, smWp, smIndex, smPlain, posts, pages, products, login, llms, ads, secTxt] = await Promise.all([
       get(at('xmlrpc.php'), 600),
       get(rest('wp/v2/users', 'per_page=10&_fields=slug,name'), 20000),
       get(at('readme.html'), 4000),
@@ -1204,8 +1254,78 @@
       get(at('sitemap.xml'), 800),
       get(rest('wp/v2/posts', 'per_page=1&_fields=date,modified'), 2000),
       get(rest('wp/v2/pages', 'per_page=1&_fields=id'), 500),
-      get(rest('wc/store/v1/products', 'per_page=1&_fields=id'), 500)
+      // Cheapest product first: its prices give the currency and the low end of the range.
+      get(rest('wc/store/v1/products', 'per_page=1&orderby=price&order=asc&_fields=id,prices'), 4000),
+      // Login pages often redirect through an account page; allow a little longer.
+      get(at('wp-login.php'), 40000, 5000),
+      // These live at the domain root, even when WordPress is in a subfolder.
+      get(origin + '/llms.txt', 4000),
+      get(origin + '/ads.txt', 30000),
+      get(origin + '/.well-known/security.txt', 4000)
     ]);
+    const isText = (r) => r.ok && !/text\/html/i.test(r.type) && !/<html|<!doctype html/i.test(r.text) && r.text.trim().length > 0;
+
+    // WooCommerce store: currency and price range from the public Store API.
+    let store = null;
+    const priceOf = (p, pick) => {
+      if (!p || !p.prices) return null;
+      const pr = p.prices, unit = Number(pr.currency_minor_unit) || 0;
+      const raw = pick === 'max' && pr.price_range && pr.price_range.max_amount ? pr.price_range.max_amount : pick === 'min' && pr.price_range && pr.price_range.min_amount ? pr.price_range.min_amount : pr.price;
+      const n = Number(raw);
+      return Number.isFinite(n) ? n / Math.pow(10, unit) : null;
+    };
+    if (products.ok) {
+      try {
+        const a = JSON.parse(products.text);
+        if (Array.isArray(a)) {
+          const first = a[0], pr = first && first.prices;
+          store = { api: true, currency: pr ? pr.currency_code || '' : '', symbol: pr ? pr.currency_symbol || '' : '', prefix: pr ? pr.currency_prefix || '' : '', suffix: pr ? pr.currency_suffix || '' : '', minor: pr ? Number(pr.currency_minor_unit) || 0 : 0, min: priceOf(first, 'min'), max: null };
+          if (first) {
+            const top = await get(rest('wc/store/v1/products', 'per_page=1&orderby=price&order=desc&_fields=id,prices'), 4000);
+            try { const b = JSON.parse(top.text); if (Array.isArray(b) && b[0]) store.max = priceOf(b[0], 'max'); } catch (e) {}
+          }
+        }
+      } catch (e) {}
+    } else if (products.status === 401 || products.status === 403) {
+      store = { api: false, status: products.status };
+    }
+
+    // Login page: the default form, or hidden / moved / blocked by a security plugin or the host.
+    const loginForm = /id=["']loginform["']|name=["']log["'][\s\S]{0,400}name=["']pwd["']|id=["']wp-submit["']/i.test(login.text);
+    let loginState = 'unknown';
+    let loginPath = '';
+    try { loginPath = login.url ? new URL(login.url).pathname : ''; } catch (e) {}
+    let loginOffsite = false;
+    if (login.status === 0 && login.error === 'failed') {
+      // A redirect to another domain (single sign-on, a separate account site) fails under CORS.
+      // Ask again without following redirects to tell that apart from a network error.
+      try {
+        const m = await fetch(at('wp-login.php'), { credentials: 'omit', cache: 'no-store', redirect: 'manual' });
+        loginOffsite = m.type === 'opaqueredirect';
+      } catch (e) {}
+    }
+    if (loginOffsite) loginState = 'offsite';
+    else if (login.status === 0) loginState = 'unknown';
+    else if (login.ok && loginForm) loginState = /wp-login\.php$/i.test(loginPath) ? 'default' : 'moved';
+    else if (login.status === 404 || (login.ok && !loginForm)) loginState = login.redirected && !/wp-login\.php$/i.test(loginPath) ? 'redirected' : 'hidden';
+    else if (login.status === 401 || login.status === 403) loginState = 'blocked';
+    else if (login.status === 429 || login.status === 503) loginState = 'limited';
+
+    // llms.txt (guidance for AI tools), ads.txt (authorised ad sellers), security.txt (security contact).
+    const llmsTxt = isText(llms) ? { found: true, title: ((llms.text.match(/^\s*#\s+(.+)$/m) || [])[1] || '').replace(/\\([\\`*_{}[\]()#+\-.!>])/g, '$1').trim().slice(0, 120) } : { found: false, status: llms.status };
+    let adsTxt = { found: false, status: ads.status };
+    if (isText(ads)) {
+      const rows = ads.text.split(/\r?\n/).map((l) => l.replace(/#.*/, '').trim()).filter((l) => /^[a-z0-9.-]+\.[a-z]{2,}\s*,\s*[^,]+,\s*(DIRECT|RESELLER)/i.test(l));
+      const doms = new Map();
+      rows.forEach((l) => { const d = l.split(',')[0].trim().toLowerCase(); doms.set(d, (doms.get(d) || 0) + 1); });
+      if (rows.length) adsTxt = { found: true, entries: rows.length, direct: rows.filter((l) => /,\s*DIRECT/i.test(l)).length, networks: [...doms.entries()].sort((x, y) => y[1] - x[1]).slice(0, 8).map(([d]) => d), networkCount: doms.size };
+    }
+    let securityTxt = { found: false, status: secTxt.status };
+    if (isText(secTxt) && /^\s*contact\s*:/im.test(secTxt.text)) {
+      const contacts = [...secTxt.text.matchAll(/^\s*contact\s*:\s*(\S+)/gim)].map((m) => m[1]).slice(0, 3);
+      const exp = (secTxt.text.match(/^\s*expires\s*:\s*(\S+)/im) || [])[1] || '';
+      securityTxt = { found: true, contacts, expires: exp, expired: exp ? Date.parse(exp) < Date.now() : false };
+    }
     // Content stats from the REST API totals (X-WP-Total) and the newest post's date.
     const count = (r) => (r.ok && r.total !== null && r.total !== undefined && /^\d+$/.test(r.total) ? Number(r.total) : null);
     let latestPost = '';
@@ -1249,7 +1369,12 @@
       debugLog: { status: debugLog.status, exposed: debugLog.ok && !isHtml(debugLog) && debugLog.text.trim().length > 0 },
       sitemap: sitemap ? { found: true, path: sitemap[0] } : { found: false },
       robots: robotsText === null ? { found: false, status: robots.status } : { found: true, sitemapLine: /^\s*sitemap:/im.test(robotsText), disallowAll },
-      content
+      content,
+      store,
+      login: { state: loginState, status: login.status, path: loginState === 'redirected' || loginState === 'moved' ? loginPath : '' },
+      llmsTxt,
+      adsTxt,
+      securityTxt
     };
   }
 
@@ -1276,7 +1401,10 @@
       lazyImages: imgs.filter((i) => i.loading === 'lazy').length,
       blockingScripts: head ? head.querySelectorAll('script[src]:not([async]):not([defer]):not([type="module"])').length : 0,
       stylesheets: document.querySelectorAll('link[rel="stylesheet"]').length,
-      domNodes: document.getElementsByTagName('*').length
+      domNodes: document.getElementsByTagName('*').length,
+      // HTML size on the wire vs. decoded: a smaller wire size means the page was compressed.
+      htmlWire: nav.encodedBodySize || 0,
+      htmlRaw: nav.decodedBodySize || 0
     };
   }
   // </deep-checks>

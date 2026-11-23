@@ -1,6 +1,6 @@
-# WPScout 2.1.0: Chrome Web Store update kit
+# WPScout 2.2.0: Chrome Web Store update kit
 
-Upload `dist/wpscout-2.1.0.zip` (build it with `./scripts/build.sh`).
+Upload `dist/wpscout-2.2.0.zip` (build it with `./scripts/build.sh`).
 
 ## Assets in this folder
 
@@ -72,9 +72,9 @@ Health checks
 • Updates: WordPress, the theme and plugins compared with the latest releases
 • Plugin health: plugins closed on WordPress.org, not updated in years, or not tested with recent WordPress versions
 • Known vulnerabilities in the detected versions (optional, with your own API key from a supported vulnerability database). Each one shows its severity, CVE, the version that fixes it and a link to the full advisory
-• Performance for your visit: server response, load time, page weight, requests, image formats and more
-• Security: common exposures, such as publicly listed usernames or a public debug log, missing security headers, and PHP versions that no longer get security fixes
-• SEO: title and description, indexing, social sharing tags, structured data, sitemap and robots.txt
+• Performance for your visit: server response, load time, page weight, requests, image formats, compression, cache policy and more
+• Security: common exposures, such as publicly listed usernames or a public debug log, whether the login page is hidden, a security.txt contact, missing security headers, and PHP versions that no longer get security fixes
+• SEO: title and description, indexing, social sharing tags, structured data, sitemap, robots.txt, llms.txt and ads.txt
 
 ━━━━━━━━━━━━━━━━━━━━
 
@@ -114,6 +114,14 @@ HOW TO USE
 3. Click the icon to see the stack, plugins and health checks.
 4. Optional: add a vulnerability API key from the menu to check for known issues.
 5. Copy or export the report when you need it.
+
+## What's new in 2.2.0
+
+• Site build: shows whether the site uses a block or classic theme, which translation plugin it uses (WPML, Polylang, TranslatePress, Weglot or GTranslate) and its languages
+• WooCommerce stores: product count, currency and price range
+• Login page: whether /wp-login.php is the default, hidden, moved or blocked
+• llms.txt, ads.txt (with the ad networks listed) and security.txt
+• Compression, cache policy, cached copy age and server timing in the Performance checks
 
 ## What's new in 2.1.0
 
@@ -160,7 +168,7 @@ No personal data, cookies or browsing history is sent to any of these hosts.
 - That **IP address** goes to `ipwho.is` to look up its network and location.
 - **Plugin and theme slugs** go to `api.wordpress.org` for official names and icons.
 - **Requests to the site you're viewing**, sent without cookies: the page itself (only its headers are read), `/wp-json`, and the theme's `style.css`.
-- **Extra checks on the site you're viewing**, only when you open the popup, sent without cookies: `/xmlrpc.php`, `/wp-json/wp/v2/users`, `/readme.html`, `/wp-content/uploads/`, `/wp-content/debug.log`, `/robots.txt`, the sitemap paths, and the REST API post, page and product counts.
+- **Extra checks on the site you're viewing**, only when you open the popup, sent without cookies: `/xmlrpc.php`, `/wp-json/wp/v2/users`, `/readme.html`, `/wp-content/uploads/`, `/wp-content/debug.log`, `/robots.txt`, the sitemap paths, `/wp-login.php`, `/llms.txt`, `/ads.txt`, `/.well-known/security.txt`, and the REST API post, page and product counts and lowest and highest product prices.
 - **The latest WordPress version** is read from `api.wordpress.org` (no site data is sent).
 - **Only if the user adds a Wordfence key:** the known-vulnerability list is downloaded from `wordfence.com` at most once a day using that key. Matching happens locally; no site or browsing data is sent to Wordfence.
 - **Only if the user adds a WPScan token:** plugin and theme slugs and the WordPress version are sent to `wpscan.com` when the popup opens. Plugin and theme versions are matched locally and results aren't stored.

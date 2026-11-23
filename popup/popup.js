@@ -634,7 +634,56 @@
           <div class="row"><dt>IPv4</dt><dd>${pending ? sk(100) : known(d.ip) ? `<span class="num strong">${esc(d.ip)}</span>` : '<span class="aux">Unknown</span>'}</dd>${known(d.ip) ? `<button class="copy" type="button" aria-label="Copy IP address" data-copy="${esc(d.ip)}" data-copy-msg="IP address copied">${ICON.copy}</button>` : '<span></span>'}</div>
           <div class="row"><dt>Nameservers</dt><dd>${pending ? sk(130) : ns.length ? `<span class="stack">${ns.map((n) => `<span class="num strong">${esc(n)}</span>`).join('')}</span>` : '<span class="aux">Unknown</span>'}</dd>${ns.length ? `<button class="copy" type="button" aria-label="Copy nameservers" data-copy="${esc(ns.join('\n'))}" data-copy-msg="Nameservers copied">${ICON.copy}</button>` : '<span></span>'}</div>
         </dl>
-      </div>${contentHTML()}${techHTML()}`;
+      </div>${siteHTML()}${storeHTML()}${contentHTML()}${techHTML()}`;
+  }
+
+  // ---- Site build: theme type and languages (from the scan)
+  let langNames = null;
+  try { langNames = new Intl.DisplayNames(['en'], { type: 'language' }); } catch (e) {}
+  const langName = (code) => { try { return (langNames && langNames.of(code)) || code; } catch (e) { return code; } };
+  function siteHTML() {
+    const d = report, tt = d.themeType, lg = d.languages;
+    if (tt === undefined && lg === undefined) return '';
+    const rows = [];
+    if (tt) {
+      const label = tt.type === 'block' ? 'Block theme' : 'Classic theme';
+      rows.push(`<div class="row" title="${esc(tt.evidence)}"><dt>Theme type</dt><dd><span class="v">${label}</span>${tt.type === 'classic' && tt.themeJson ? '<span class="aux">uses theme.json</span>' : tt.type === 'block' ? '<span class="aux">Site Editor</span>' : ''}</dd><span></span></div>`);
+    }
+    if (lg) {
+      const codes = lg.hreflang || [];
+      rows.push(`<div class="row"><dt>Translation</dt><dd>${lg.plugin ? `<span class="v">${esc(lg.plugin)}</span>` : codes.length > 1 ? '<span class="aux">Plugin not identified</span>' : '<span class="aux">None detected</span>'}</dd><span></span></div>`);
+      const shown = codes.length > 1 ? codes : lg.lang ? [lg.lang] : [];
+      const names = [...new Set(shown.map(langName))];
+      const list = names.slice(0, 6).join(', ') + (names.length > 6 ? ` +${names.length - 6}` : '');
+      rows.push(`<div class="row" title="${esc(shown.join(', '))}"><dt>Language${names.length === 1 ? '' : 's'}</dt><dd>${names.length ? `${codes.length > 1 ? `<span class="v">${names.length}</span>` : ''}<span class="${codes.length > 1 ? 'aux' : 'v'} clip">${esc(list)}</span>` : '<span class="aux">Not set</span>'}</dd><span></span></div>`);
+    }
+    return `<div class="grp"><div class="grp-h"><h2>Site</h2></div><dl class="rows">${rows.join('')}</dl></div>`;
+  }
+
+  // ---- WooCommerce store details (from the popup-time Store API check)
+  function fmtMoney(s, v) {
+    if (v === null || v === undefined) return '';
+    if (v === 0) return 'Free';
+    const n = v.toLocaleString('en', { minimumFractionDigits: s.minor ? Math.min(s.minor, 2) : 0, maximumFractionDigits: s.minor ? Math.min(s.minor, 2) : 0 });
+    return s.prefix || s.suffix ? `${s.prefix}${n}${s.suffix}` : `${s.symbol || ''}${n}`;
+  }
+  function storeHTML() {
+    const d = report, k = d.deep;
+    const woo = /woocommerce/i.test(d.ecommerce || '') || (d.plugins || []).some((p) => p.slug === 'woocommerce');
+    if (!woo) return '';
+    const sk = (w) => `<span class="sk" style="width:${w}px"></span>`;
+    const rows = [];
+    const s = k && !k.error ? k.store : null;
+    if (!k) rows.push(`<div class="row"><dt>Currency</dt><dd>${sk(70)}</dd><span></span></div>`, `<div class="row"><dt>Prices</dt><dd>${sk(110)}</dd><span></span></div>`);
+    else if (!s) rows.push('<div class="row"><dt>Store API</dt><dd><span class="aux">Not public</span></dd><span></span></div>');
+    else if (!s.api) rows.push(`<div class="row"><dt>Store API</dt><dd><span class="aux">Blocked (${esc(s.status)})</span></dd><span></span></div>`);
+    else {
+      const count = k.content ? k.content.products : null;
+      rows.push(`<div class="row"><dt>Products</dt><dd>${count !== null && count !== undefined ? `<span class="v">${count.toLocaleString()}</span>` : '<span class="aux">Unknown</span>'}</dd><span></span></div>`);
+      rows.push(`<div class="row"><dt>Currency</dt><dd>${s.currency ? `<span class="v">${esc(s.currency)}</span>${s.symbol ? `<span class="num">${esc(s.symbol)}</span>` : ''}` : '<span class="aux">No products to read</span>'}</dd><span></span></div>`);
+      if (s.min !== null) rows.push(`<div class="row"><dt>Prices</dt><dd><span class="v">${esc(fmtMoney(s, s.min))}${s.max !== null && s.max !== s.min ? ` – ${esc(fmtMoney(s, s.max))}` : ''}</span></dd><span></span></div>`);
+    }
+    return `<div class="grp"><div class="grp-h"><h2>Store</h2><span class="aux" style="font-size:12px">WooCommerce</span></div><dl class="rows">${rows.join('')}</dl></div>`;
   }
 
   const SIGNALS = [
@@ -828,6 +877,10 @@
       items.push(k.readme.exposed ? { label: 'readme.html', cls: 'warn', tag: 'Public', note: k.readme.version ? `Shows version ${k.readme.version}` : 'Shows the WordPress readme' } : { label: 'readme.html', cls: 'ok', tag: 'Hidden', note: '' });
       items.push(k.uploadsListing.exposed ? { label: 'Uploads', cls: 'warn', tag: 'Listing on', note: '/wp-content/uploads/ lists files' } : { label: 'Uploads', cls: 'ok', tag: 'Listing off', note: '' });
       items.push(k.debugLog.exposed ? { label: 'debug.log', cls: 'bad', tag: 'Exposed', note: '/wp-content/debug.log is public' } : { label: 'debug.log', cls: 'ok', tag: 'Not public', note: '' });
+      const lg = loginItem(k.login);
+      if (lg) items.push(lg);
+      const st = k.securityTxt;
+      if (st) items.push(st.found ? { label: 'security.txt', cls: st.expired ? 'warn' : 'ok', tag: st.expired ? 'Expired' : 'Found', note: st.contacts.join(', ') + (st.expires ? ` · expires ${st.expires.slice(0, 10)}` : '') } : { label: 'security.txt', cls: '', tag: 'None', note: 'No /.well-known/security.txt contact' });
     } else {
       items.push({ pending: true }, { pending: true }, { pending: true });
     }
@@ -845,9 +898,32 @@
     return items;
   }
 
+  // Login page state from the popup-time check of /wp-login.php.
+  function loginItem(l) {
+    if (!l) return null;
+    switch (l.state) {
+      case 'default': return { label: 'Login page', cls: '', tag: 'Default', note: '/wp-login.php shows the login form' };
+      case 'moved': return { label: 'Login page', cls: 'ok', tag: 'Moved', note: `/wp-login.php forwards to ${l.path}` };
+      case 'offsite': return { label: 'Login page', cls: 'ok', tag: 'Elsewhere', note: '/wp-login.php redirects to another domain (single sign-on or an account site)' };
+      case 'redirected': return { label: 'Login page', cls: 'ok', tag: 'Hidden', note: `/wp-login.php redirects to ${l.path || 'another page'}` };
+      case 'hidden': return { label: 'Login page', cls: 'ok', tag: 'Hidden', note: `/wp-login.php answered ${l.status} without a login form` };
+      case 'blocked': return { label: 'Login page', cls: 'ok', tag: 'Blocked', note: `/wp-login.php answered ${l.status}` };
+      case 'limited': return { label: 'Login page', cls: 'ok', tag: 'Protected', note: `/wp-login.php answered ${l.status} (rate limit or challenge)` };
+      default: return { label: 'Login page', cls: '', tag: 'Unknown', note: 'Couldn’t reach /wp-login.php' };
+    }
+  }
+
+  // AI and ad files at the domain root.
+  function filesItems(k) {
+    const out = [];
+    if (k.llmsTxt) out.push(k.llmsTxt.found ? { label: 'llms.txt', cls: 'ok', tag: 'Found', note: k.llmsTxt.title || 'Guidance for AI tools' } : { label: 'llms.txt', cls: '', tag: 'None', note: 'No guidance file for AI tools' });
+    if (k.adsTxt) out.push(k.adsTxt.found ? { label: 'ads.txt', cls: 'ok', tag: `${k.adsTxt.networkCount} network${k.adsTxt.networkCount === 1 ? '' : 's'}`, note: `${k.adsTxt.entries} sellers (${k.adsTxt.direct} direct): ${k.adsTxt.networks.join(', ')}` } : { label: 'ads.txt', cls: '', tag: 'None', note: 'No ad sellers listed' });
+    return out;
+  }
+
   function seoItems() {
     const s = report.seo, k = report.deep, items = [];
-    if (!s) return [{ label: 'SEO', cls: '', tag: 'Not read', note: 'Rescan to read this page’s metadata' }];
+    if (!s) return [{ label: 'SEO', cls: '', tag: 'Not read', note: 'Rescan to read this page’s metadata' }, ...(k && !k.error ? filesItems(k) : [])];
     const len = (x) => [...(x || '')].length;
     items.push(!s.title ? { label: 'Title', cls: 'warn', tag: 'Missing', note: '' } : { label: 'Title', cls: len(s.title) > 60 ? 'warn' : 'ok', tag: `${len(s.title)} chars`, note: s.title });
     items.push(!s.description ? { label: 'Description', cls: 'warn', tag: 'Missing', note: 'No meta description' } : { label: 'Description', cls: len(s.description) > 160 ? 'warn' : 'ok', tag: `${len(s.description)} chars`, note: s.description });
@@ -862,6 +938,7 @@
     if (k && !k.error) {
       items.push(k.sitemap.found ? { label: 'Sitemap', cls: 'ok', tag: 'Found', note: k.sitemap.path } : { label: 'Sitemap', cls: 'warn', tag: 'Not found', note: 'Checked /wp-sitemap.xml, /sitemap_index.xml, /sitemap.xml' });
       items.push(!k.robots.found ? { label: 'robots.txt', cls: '', tag: 'Not found', note: '' } : k.robots.disallowAll ? { label: 'robots.txt', cls: 'warn', tag: 'Blocks all', note: 'Disallow: / for all crawlers' } : { label: 'robots.txt', cls: 'ok', tag: 'Found', note: k.robots.sitemapLine ? 'Lists a sitemap' : 'No Sitemap line' });
+      items.push(...filesItems(k));
     } else if (!k) items.push({ pending: true }, { pending: true });
     return items;
   }
@@ -1092,6 +1169,43 @@
     }
     items.push({ label: 'Blocking scripts', cls: f.blockingScripts > 3 ? 'warn' : 'ok', tag: String(f.blockingScripts), note: 'In <head> without async or defer' });
     items.push({ label: 'DOM size', cls: f.domNodes > 1500 ? 'warn' : 'ok', tag: `${f.domNodes.toLocaleString()} nodes`, note: '' });
+    items.push(...deliveryItems(report.delivery, f));
+    return items;
+  }
+
+  // Compression and caching of the page itself, from its response headers.
+  const fmtSecs = (s) => s >= 86400 ? `${Math.round(s / 86400)} d` : s >= 3600 ? `${Math.round(s / 3600)} h` : s >= 60 ? `${Math.round(s / 60)} min` : `${s} s`;
+  function deliveryItems(dl, f) {
+    const items = [];
+    const ENC = { br: 'Brotli', gzip: 'gzip', zstd: 'Zstandard', deflate: 'Deflate' };
+    const enc = dl && dl.encoding ? dl.encoding.split(',').map((x) => x.trim()).filter(Boolean).pop() : '';
+    const ratio = f && f.htmlWire && f.htmlRaw ? f.htmlWire / f.htmlRaw : null;
+    if (enc && enc !== 'identity') items.push({ label: 'Compression', cls: 'ok', tag: ENC[enc] || enc, note: ratio && ratio < 0.95 ? `HTML ${fmtBytes(f.htmlRaw)} sent as ${fmtBytes(f.htmlWire)}` : 'content-encoding' });
+    else if (ratio !== null && ratio < 0.9) items.push({ label: 'Compression', cls: 'ok', tag: 'On', note: `HTML ${fmtBytes(f.htmlRaw)} sent as ${fmtBytes(f.htmlWire)}` });
+    else if (dl) items.push({ label: 'Compression', cls: 'warn', tag: 'None', note: 'The page is sent uncompressed; Brotli or gzip makes it smaller' });
+    if (!dl) return items;
+    const cc = (dl.cacheControl || '').toLowerCase();
+    if (cc) {
+      const num = (k) => { const m = cc.match(new RegExp(`(?:^|[,\\s])${k}=(\\d+)`)); return m ? Number(m[1]) : null; };
+      const maxAge = num('max-age'), sMax = num('s-maxage');
+      const parts = [];
+      if (/no-store/.test(cc)) parts.push('Not stored');
+      else if (/no-cache/.test(cc) || maxAge === 0) parts.push('Revalidated');
+      else if (maxAge) parts.push(`Browser ${fmtSecs(maxAge)}`);
+      if (sMax) parts.push(`CDN ${fmtSecs(sMax)}`);
+      if (/private/.test(cc)) parts.push('Private');
+      items.push({ label: 'Cache policy', cls: '', tag: parts.join(' · ') || 'Set', note: dl.cacheControl });
+    } else items.push({ label: 'Cache policy', cls: '', tag: 'Not set', note: 'No Cache-Control header' });
+    const age = Number(dl.age);
+    if (dl.age !== '' && Number.isFinite(age)) items.push({ label: 'Cached copy', cls: 'ok', tag: age ? `${fmtSecs(age)} old` : 'Fresh', note: 'Age header: served from a shared cache' });
+    if (dl.serverTiming) {
+      const timings = dl.serverTiming.split(',').map((s) => {
+        const name = s.split(';')[0].trim(), dur = (s.match(/dur=([\d.]+)/) || [])[1], desc = (s.match(/desc="?([^";]+)/) || [])[1];
+        return { name: desc || name, dur: dur ? Number(dur) : null };
+      }).filter((t) => t.name);
+      const timed = timings.filter((t) => t.dur !== null).sort((a, b) => b.dur - a.dur);
+      items.push({ label: 'Server timing', cls: '', tag: timed.length ? `${timed[0].name} ${Math.round(timed[0].dur)} ms` : `${timings.length} metric${timings.length === 1 ? '' : 's'}`, note: timings.slice(0, 5).map((t) => t.dur !== null ? `${t.name} ${Math.round(t.dur)} ms` : t.name).join(', ') });
+    }
     return items;
   }
 
@@ -1126,7 +1240,7 @@
       rows.push(`<div class="row"><dt>Posts</dt><dd>${n(c.posts)}</dd><span></span></div>`);
       rows.push(`<div class="row"><dt>Latest post</dt><dd>${c.latestPost ? `<span class="v">${esc(relDate(c.latestPost))}</span><span class="num">${esc(c.latestPost.slice(0, 10))}</span>` : '<span class="aux">None public</span>'}</dd><span></span></div>`);
       rows.push(`<div class="row"><dt>Pages</dt><dd>${n(c.pages)}</dd><span></span></div>`);
-      if (c.products !== null && c.products !== undefined) rows.push(`<div class="row"><dt>Products</dt><dd>${n(c.products)}</dd><span></span></div>`);
+      if (c.products !== null && c.products !== undefined && !storeHTML()) rows.push(`<div class="row"><dt>Products</dt><dd>${n(c.products)}</dd><span></span></div>`);
     }
     rows.push(`<div class="row"><dt>Multisite</dt><dd>${d.multisite ? `<span class="v">Network site</span><span class="num">#${esc(d.multisite.siteId)}</span>` : '<span class="aux">Not detected</span>'}</dd><span></span></div>`);
     return `<div class="grp"><div class="grp-h"><h2>Content</h2></div><dl class="rows">${rows.join('')}</dl></div>`;
@@ -1223,7 +1337,7 @@
   // current detector, so the Checks and Stack tabs aren't empty.
   async function fillMissingFields(tabId) {
     const r = report;
-    if (!r || (r.seo && Array.isArray(r.tech) && r.securityHeaders !== undefined)) return;
+    if (!r || (r.seo && Array.isArray(r.tech) && r.securityHeaders !== undefined && r.languages !== undefined)) return;
     try {
       const out = await chrome.scripting.executeScript({ target: { tabId }, func: detectWordPress });
       const fresh = out && out[0] ? out[0].result : null;
@@ -1231,6 +1345,9 @@
       r.seo = fresh.seo || null;
       r.tech = fresh.tech || [];
       r.securityHeaders = fresh.securityHeaders === undefined ? null : fresh.securityHeaders;
+      r.languages = fresh.languages || null;
+      r.themeType = fresh.themeType || null;
+      r.delivery = fresh.delivery || null;
       renderHosting();
       refreshHealthViews();
       notifyTabStatus(tabId, true, r.plugins.length, r);
@@ -1274,8 +1391,14 @@
       '',
       '## Stack',
       line('Theme', known(d.theme) ? `${t.name}${t.version ? ' ' + t.version : ''} (\`${d.theme}\`)${t.child ? ` · parent theme: ${formatThemeName(t.parent)}` : ''}` : 'Not detected'),
+      line('Theme type', d.themeType ? (d.themeType.type === 'block' ? 'Block theme' : `Classic theme${d.themeType.themeJson ? ' (uses theme.json)' : ''}`) : 'Unknown'),
       line('Builder', d.pageBuilder || 'None detected'),
       line('Store', known(d.ecommerce) ? d.ecommerce : 'None'),
+      ...(() => { const s = d.deep && d.deep.store; if (!s || !s.api || !s.currency) return [];
+        return [line('Store currency', `${s.currency}${s.min !== null ? ` · prices ${fmtMoney(s, s.min)}${s.max !== null && s.max !== s.min ? ` – ${fmtMoney(s, s.max)}` : ''}` : ''}`)]; })(),
+      ...(() => { const l = d.languages; if (!l) return [];
+        const codes = l.hreflang && l.hreflang.length > 1 ? l.hreflang : l.lang ? [l.lang] : [];
+        return [line('Translation', l.plugin || (codes.length > 1 ? 'plugin not identified' : 'none detected')), line('Languages', codes.length ? [...new Set(codes.map(langName))].join(', ') : 'not set')]; })(),
       line('Hosting', known(d.hostingPlatform) ? d.hostingPlatform : (known(d.proxyCDN) ? d.proxyCDN : 'Not identified')),
       line('Web server', known(d.serverSoftware) ? d.serverSoftware : 'Not exposed'),
       line('PHP', known(d.phpVersion) ? d.phpVersion.replace(/^PHP\//i, '') : 'Not exposed'),
@@ -1611,7 +1734,13 @@
     uploadsListing: { status: 403, exposed: false },
     debugLog: { status: 404, exposed: false },
     sitemap: { found: true, path: '/wp-sitemap.xml' },
-    robots: { found: true, sitemapLine: true, disallowAll: false }
+    robots: { found: true, sitemapLine: true, disallowAll: false },
+    content: { posts: 1824, pages: 96, products: 412, latestPost: '2026-11-20T10:00:00' },
+    store: { api: true, currency: 'USD', symbol: '$', prefix: '$', suffix: '', minor: 2, min: 4.99, max: 249 },
+    login: { state: 'redirected', status: 200, path: '/' },
+    llmsTxt: { found: true, title: 'NASA' },
+    adsTxt: { found: false, status: 404 },
+    securityTxt: { found: true, contacts: ['https://www.nasa.gov/vulnerability-disclosure-policy/'], expires: '2027-06-30T00:00:00Z', expired: false }
   };
 
   // Sample report used only by the standalone preview.
@@ -1634,7 +1763,10 @@
       pageBuilder: 'Gutenberg (Block Editor)',
       hasGutenberg: true,
       hostingPlatform: 'WordPress VIP',
-      ecommerce: 'None',
+      ecommerce: 'WooCommerce',
+      themeType: { type: 'classic', themeJson: true, evidence: 'No block template wrapper; theme.json layout settings in global styles' },
+      languages: { plugin: 'WPML', hreflang: ['en-US', 'es', 'fr', 'de'], xDefault: true, lang: 'en-US' },
+      delivery: { encoding: 'br', cacheControl: 'max-age=300, s-maxage=3600', age: '128', serverTiming: 'wp;dur=212.4, db;desc="Database";dur=48.1', expires: '', lastModified: '' },
       serverSoftware: 'nginx/1.26.1',
       proxyCDN: 'WordPress VIP (Automattic)',
       phpVersion: 'PHP/8.2.30',
