@@ -1554,6 +1554,13 @@
         if (a === 'save-key') saveVulnKey(act.dataset.provider);
         if (a === 'remove-key') removeVulnKey(act.dataset.provider);
         if (a === 'clear-search') { $('plugin-search').value = ''; renderPluginList(); $('plugin-search').focus(); }
+        if (a === 'rate') { setMenu(false); rateNow(); }
+        if (a === 'welcome-done') finishWelcome();
+        if (a === 'welcome-try') { finishWelcome(); openUrl(SAMPLE_SITE); }
+        if (a === 'review-rate') rateNow();
+        if (a === 'review-done') answerReview('done');
+        if (a === 'review-later') answerReview('later');
+        if (a === 'review-never') answerReview('never');
         return;
       }
 
@@ -1565,6 +1572,20 @@
       const r = e.target.closest && e.target.closest('[role="button"][data-reveal], [role="button"][data-goto]');
       if (r && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); r.click(); }
     });
+
+    // Sheets: keep focus inside, Escape closes (welcome counts as done, review as "later").
+    document.addEventListener('keydown', (e) => {
+      const open = openSheetEl();
+      if (!open) return;
+      if (e.key === 'Escape') { e.preventDefault(); if (open.id === 'welcome') finishWelcome(); else answerReview('later'); return; }
+      if (e.key !== 'Tab') return;
+      const f = [...open.querySelectorAll('button:not([hidden]):not(:disabled), a[href]')];
+      if (!f.length) return;
+      const i = f.indexOf(document.activeElement);
+      if (e.shiftKey && i <= 0) { e.preventDefault(); f[f.length - 1].focus(); }
+      else if (!e.shiftKey && i === f.length - 1) { e.preventDefault(); f[0].focus(); }
+    }, true);
+    $('review').addEventListener('click', (e) => { if (e.target === $('review')) answerReview('later'); });
 
     window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', syncThemeLabel);
     if (document.fonts && document.fonts.ready) document.fonts.ready.then(placeInk);
@@ -1633,6 +1654,7 @@
           fromCache = true;
           if (!cached.isWP) { renderEmpty('nowp', tab); return; }
           renderReport(cached);
+          noteScan();
           enrichTheme();
           fillMissingFields(tab.id);
           runDeepChecks(tab.id);
@@ -1661,6 +1683,7 @@
       }
       data.hostname = new URL(tab.url).hostname;
       renderReport(data);
+      noteScan();
       enrichTheme();
       fillMissingFields(tab.id);
       runDeepChecks(tab.id);
@@ -1721,6 +1744,8 @@
     if (opts.includes('theme-open')) toggleReveal(document.querySelector('#stack-rows [data-reveal]'), true);
     if (opts.includes('plugin-open')) { const b = document.querySelector('#plugins-list .pl-main'); toggleReveal(b, true); }
     if (opts.includes('menu')) setTimeout(() => setMenu(true), 50);
+    if (opts.includes('welcome')) { $('welcome-try').hidden = false; openSheet('welcome'); }
+    if (opts.includes('review')) { onboard.scans = 10; showReview(); }
     if (opts.includes('signal-open')) toggleReveal(document.querySelector('#pane-evidence .sig-main'), true);
     if (opts.includes('scroll-end')) setTimeout(() => { $('body').scrollTop = 1e6; }, 4000);
   }
@@ -1811,9 +1836,91 @@
   }
 
 
+  // ------------------------------------------------------------------ welcome and review prompt
+  // Stored in chrome.storage.local: { welcomed, scans, review: 'pending' | 'done' | 'never', askAt }.
+  // A "scan" is a popup opening that shows a WordPress report (counted once per opening).
+  const STORE_URL = 'https://chromewebstore.google.com/detail/pnfcaepdbhbioeplilbgliegcnclpake';
+  const REVIEW_URL = STORE_URL + '/reviews';
+  const SAMPLE_SITE = 'https://wordpress.org/news/';
+  const ONBOARD_KEY = 'wpscout_onboard';
+  const REVIEW_AFTER = 10;   // first ask after this many scans
+  const REVIEW_SNOOZE = 15;  // "Maybe later" asks again after this many more
+  let onboard = { welcomed: false, scans: 0, review: 'pending', askAt: REVIEW_AFTER };
+  let scanCounted = false;
+  let sheetReturnFocus = null;
+
+  let onboardReady = null;
+  function loadOnboard() {
+    if (!onboardReady) onboardReady = (async () => {
+      if (!hasChrome) return;
+      try { const r = await chrome.storage.local.get(ONBOARD_KEY); onboard = { ...onboard, ...(r[ONBOARD_KEY] || {}) }; } catch (e) {}
+    })();
+    return onboardReady;
+  }
+  function saveOnboard() {
+    if (!hasChrome) return;
+    chrome.storage.local.set({ [ONBOARD_KEY]: onboard }).catch(() => {});
+  }
+  const openSheetEl = () => ['welcome', 'review'].map($).find((el) => el && !el.hidden) || null;
+  function openSheet(id) {
+    if (openSheetEl()) return false;
+    setMenu(false);
+    sheetReturnFocus = document.activeElement;
+    $(id).hidden = false;
+    const first = $(id).querySelector('.btn.primary');
+    if (first) first.focus();
+    return true;
+  }
+  function closeSheet(id) {
+    $(id).hidden = true;
+    if (sheetReturnFocus && document.contains(sheetReturnFocus)) sheetReturnFocus.focus();
+    sheetReturnFocus = null;
+  }
+
+  async function showWelcome() {
+    let tab = currentTab;
+    if (!tab && hasChrome) { try { [tab] = await chrome.tabs.query({ active: true, currentWindow: true }); } catch (e) {} }
+    // After install the active tab is usually the Chrome Web Store, which can't be scanned.
+    $('welcome-try').hidden = !!(tab && tab.url && !isInternal(tab.url));
+    openSheet('welcome');
+  }
+  function finishWelcome() {
+    onboard.welcomed = true;
+    saveOnboard();
+    closeSheet('welcome');
+  }
+
+  async function noteScan() {
+    if (!hasChrome || scanCounted) return;
+    scanCounted = true;
+    await loadOnboard();  // never count on top of the defaults before the saved state has loaded
+    onboard.scans = (onboard.scans || 0) + 1;
+    saveOnboard();
+    if (onboard.welcomed && onboard.review === 'pending' && onboard.scans >= (onboard.askAt || REVIEW_AFTER)) {
+      // Let the report appear first, so the prompt doesn't cover what the user opened WPScout for.
+      setTimeout(showReview, 1400);
+    }
+  }
+  function showReview() {
+    $('review-count').textContent = String(Math.max(onboard.scans || 0, REVIEW_AFTER));
+    openSheet('review');
+  }
+  function rateNow() {
+    openUrl(REVIEW_URL);
+    answerReview('done');
+  }
+  function answerReview(choice) {
+    if (choice === 'done' || choice === 'never') onboard.review = choice;
+    if (choice === 'later') onboard.askAt = (onboard.scans || 0) + REVIEW_SNOOZE;
+    saveOnboard();
+    if (!$('review').hidden) closeSheet('review');
+    if (choice === 'done' && hasChrome) toast('Thank you for supporting WPScout');
+  }
+
   // ------------------------------------------------------------------ boot
   applyTheme(storedTheme());
   $('app-version').textContent = APP_VERSION ? `WPScout ${APP_VERSION}` : 'WPScout';
   wire();
+  loadOnboard().then(() => { if (hasChrome && !onboard.welcomed) showWelcome(); });
   runDiagnostics();
 })();

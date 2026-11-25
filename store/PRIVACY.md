@@ -44,6 +44,7 @@ WPScout doesn't send anything about you, your account or your other tabs to any 
 - **Scan results** for each open tab, kept in Chrome's session storage so the popup opens instantly. Chrome deletes them when you close the tab or the browser.
 - **Cached lookups** (IP address and nameservers per site for up to 1 hour, and the site's REST API route list for up to 30 minutes), kept only in the extension's memory and cleared when the browser stops the extension's background worker.
 - **Your theme choice** (light or dark), saved in the extension's local storage.
+- **Welcome and review prompt state**: whether you've seen the welcome screen, how many times you've opened WPScout on a WordPress site, and your answer to the review prompt. Only the count is kept, not which sites, and it never leaves your browser.
 - **Your vulnerability API keys** (Wordfence, WPScan), only the ones you add, saved in the extension's local storage, plus Wordfence's downloaded vulnerability list. Remove either key from **Vulnerability checks** in the menu.
 
 Nothing is synced to your Google account, and nothing is stored on any server.
@@ -60,7 +61,7 @@ Nothing is synced to your Google account, and nothing is stored on any server.
 |---|---|
 | `tabs` | Reading the current tab's address so the toolbar badge and report match the page you're on |
 | `activeTab`, `scripting` | Scanning the current tab when you click the toolbar icon |
-| `storage` | The session cache of scan results and your theme choice |
+| `storage` | The session cache of scan results, your theme choice, and the welcome and review prompt state |
 | Optional access to `www.wordfence.com` and `wpscan.com` | Asked for only when you add that provider's key, and removed when you remove it |
 | Access to `api.wordpress.org`, `ps.w.org`, `dns.google` and `ipwho.is` | The lookups described above |
 | Content script on all `http` and `https` pages | Detecting WordPress so the toolbar badge can show the plugin count |

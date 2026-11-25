@@ -1,6 +1,6 @@
-# WPScout 2.2.0: Chrome Web Store update kit
+# WPScout 2.3.0: Chrome Web Store update kit
 
-Upload `dist/wpscout-2.2.0.zip` (build it with `./scripts/build.sh`).
+Upload `dist/wpscout-2.3.0.zip` (build it with `./scripts/build.sh`).
 
 ## Assets in this folder
 
@@ -115,6 +115,11 @@ HOW TO USE
 4. Optional: add a vulnerability API key from the menu to check for known issues.
 5. Copy or export the report when you need it.
 
+## What's new in 2.3.0
+
+• A short welcome screen the first time you open WPScout
+• "Rate WPScout" in the menu, and an occasional, easy-to-dismiss review request
+
 ## What's new in 2.2.0
 
 • Site build: shows whether the site uses a block or classic theme, which translation plugin it uses (WPML, Polylang, TranslatePress, Weglot or GTranslate) and its languages
@@ -148,7 +153,7 @@ tabs:
 Reads the URL of each tab so the toolbar badge (the number of plugins found) and the popup's report match the page the user is on, and update as they switch tabs or navigate.
 
 storage:
-Keeps each tab's scan result in session storage so the popup opens instantly (cleared when the browser closes), and saves the user's light or dark theme choice. If the user adds an optional vulnerability API key, it is saved in local storage on their computer.
+Keeps each tab's scan result in session storage so the popup opens instantly (cleared when the browser closes), and saves the user's light or dark theme choice and the welcome and review prompt state (a scan count, not which sites). If the user adds an optional vulnerability API key, it is saved in local storage on their computer.
 
 Host permission:
 Required hosts, used only to look up public information about the site being viewed:

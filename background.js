@@ -351,7 +351,20 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 });
 
 // 5. Global initialization on install or extension update
-chrome.runtime.onInstalled.addListener(async () => {
+chrome.runtime.onInstalled.addListener(async (details) => {
+  // First install: open the popup so the welcome screen greets the user (Chrome 127+; needs a
+  // focused window, so it quietly does nothing otherwise and the welcome shows on first open).
+  // Updates: people who already use WPScout skip the welcome.
+  try {
+    const key = 'wpscout_onboard';
+    const cur = (await chrome.storage.local.get(key))[key];
+    if (details && details.reason === 'install') {
+      if (!cur && chrome.action.openPopup) chrome.action.openPopup().catch(() => {});
+    } else if (details && details.reason === 'update' && !cur) {
+      await chrome.storage.local.set({ [key]: { welcomed: true, scans: 0, review: 'pending', askAt: 10 } });
+    }
+  } catch (e) {}
+
   chrome.action.setIcon({ path: ICONS_ACTIVE }).catch(() => {});
   chrome.action.setTitle({ title: 'WPScout - Scout Any WordPress Website' }).catch(() => {});
   chrome.action.setBadgeText({ text: '' }).catch(() => {});

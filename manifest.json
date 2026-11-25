@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "WPScout - Scout Any WordPress Website",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "description": "See how any WordPress site is built: version, theme, plugins and updates, hosting, tech stack, and security and SEO checks.",
   "icons": {
     "16": "icons/icon-16.png",

@@ -47,6 +47,10 @@
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/></svg>
         <span id="theme-label">Dark theme</span>
       </button>
+      <button class="mi" type="button" role="menuitem" data-action="rate">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="m12 3 2.7 5.6 6.1.8-4.5 4.2 1.1 6.1L12 16.8 6.6 19.7l1.1-6.1L3.2 9.4l6.1-.8z"/></svg>
+        Rate WPScout
+      </button>
       <a class="mi" role="menuitem" href="https://wise.com/pay/r/dY07p1CL5kn91qw" target="_blank" rel="noopener noreferrer">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M12 20s-7.5-4.4-7.5-10A4.3 4.3 0 0 1 12 7.6 4.3 4.3 0 0 1 19.5 10c0 5.6-7.5 10-7.5 10z"/></svg>
         Support WPScout
@@ -180,6 +184,58 @@
     </footer>
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+    <!-- First run: welcome -->
+    <div class="sheet-wrap full" id="welcome" hidden>
+      <div class="sheet welcome" role="dialog" aria-modal="true" aria-labelledby="welcome-title" aria-describedby="welcome-desc">
+        <div class="welcome-top">
+          <img class="welcome-logo" src="logo.svg" alt="">
+          <h2 id="welcome-title">Welcome to WPScout</h2>
+          <p id="welcome-desc">See how any WordPress site is built, in one click.</p>
+        </div>
+        <ul class="welcome-list">
+          <li>
+            <span class="wl-ico" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg></span>
+            <span><b>Open it on any site.</b> The badge on the WPScout icon shows how many plugins a WordPress site uses.</span>
+          </li>
+          <li>
+            <span class="wl-ico" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12.5 9 17.5 20 6.5"/></svg></span>
+            <span><b>Health checks when you open it.</b> Updates, security, speed and SEO, without slowing down your browsing.</span>
+          </li>
+          <li>
+            <span class="wl-ico" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg></span>
+            <span><b>Private by design.</b> No account and no tracking. Results stay in your browser.</span>
+          </li>
+        </ul>
+        <p class="welcome-tip">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 17v4"/><path d="M8 3h8l-1 6 3 4H6l3-4z"/></svg>
+          <span>Tip: pin WPScout from the puzzle-piece menu so it’s always one click away.</span>
+        </p>
+        <div class="sheet-actions">
+          <button class="btn primary lg" type="button" data-action="welcome-done">Get started</button>
+          <button class="btn lg" type="button" data-action="welcome-try" id="welcome-try" hidden>Try it on a sample site</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- After a few scans: ask for a review -->
+    <div class="sheet-wrap" id="review" hidden>
+      <div class="sheet review" role="dialog" aria-modal="true" aria-labelledby="review-title" aria-describedby="review-desc">
+        <div class="stars" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><path d="m12 3 2.7 5.6 6.1.8-4.5 4.2 1.1 6.1L12 16.8 6.6 19.7l1.1-6.1L3.2 9.4l6.1-.8z"/></svg><svg viewBox="0 0 24 24"><path d="m12 3 2.7 5.6 6.1.8-4.5 4.2 1.1 6.1L12 16.8 6.6 19.7l1.1-6.1L3.2 9.4l6.1-.8z"/></svg><svg viewBox="0 0 24 24"><path d="m12 3 2.7 5.6 6.1.8-4.5 4.2 1.1 6.1L12 16.8 6.6 19.7l1.1-6.1L3.2 9.4l6.1-.8z"/></svg><svg viewBox="0 0 24 24"><path d="m12 3 2.7 5.6 6.1.8-4.5 4.2 1.1 6.1L12 16.8 6.6 19.7l1.1-6.1L3.2 9.4l6.1-.8z"/></svg><svg viewBox="0 0 24 24"><path d="m12 3 2.7 5.6 6.1.8-4.5 4.2 1.1 6.1L12 16.8 6.6 19.7l1.1-6.1L3.2 9.4l6.1-.8z"/></svg>
+        </div>
+        <h2 id="review-title">Enjoying WPScout?</h2>
+        <p id="review-desc">You’ve scouted <span id="review-count">10</span> WordPress sites. A short review on the Chrome Web Store helps other people find it, and it only takes a minute.</p>
+        <div class="sheet-actions">
+          <button class="btn primary lg" type="button" data-action="review-rate">Leave a review</button>
+          <div class="sheet-row">
+            <button class="btn" type="button" data-action="review-later">Maybe later</button>
+            <button class="btn" type="button" data-action="review-done">I already did</button>
+          </div>
+          <button class="link quiet" type="button" data-action="review-never">No thanks, don’t ask again</button>
+        </div>
+      </div>
+    </div>
   </div>
 
   <script src="detect.js"></script>
