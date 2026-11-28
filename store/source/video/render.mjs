@@ -2,6 +2,7 @@
 //
 //   npm i playwright-core ffmpeg-static   (anywhere; point DEPS at that folder's package.json)
 //   DEPS=/path/to/deps/package.json node store/source/video/render.mjs [out.mp4] [fps]
+//   SCALE=2 renders 3840 × 2160 (YouTube streams 4K uploads at a higher bitrate, so 1080p viewers see it sharper too)
 //
 // Uses the installed Google Chrome. Each frame calls window.seek(t), so the output
 // is deterministic and never drops frames.
@@ -18,10 +19,11 @@ const ffmpeg = require('ffmpeg-static');
 const here = path.dirname(fileURLToPath(import.meta.url));
 const out = path.resolve(process.argv[2] || path.join(here, '../../wpscout-promo-1080p.mp4'));
 const fps = Number(process.argv[3] || 30);
+const scale = Number(process.env.SCALE || 1);
 const chrome = process.env.CHROME || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 
 const browser = await chromium.launch({ executablePath: chrome });
-const page = await browser.newPage({ viewport: { width: 1920, height: 1080 }, deviceScaleFactor: 1 });
+const page = await browser.newPage({ viewport: { width: 1920, height: 1080 }, deviceScaleFactor: scale });
 await page.goto(pathToFileURL(path.join(here, 'promo.html')).href + '?t=0');
 await page.evaluate(() => document.fonts.ready);
 await page.waitForLoadState('networkidle');
