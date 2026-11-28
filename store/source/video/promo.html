@@ -1,0 +1,271 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<title>WPScout promo</title>
+<!--
+  WPScout promo video, 1920 × 1080. Every frame is a pure function of time:
+  open this file and call window.seek(seconds), or add ?t=12.5 to the URL.
+  Rendered to MP4 by render.mjs in this folder.
+-->
+<style>
+@font-face { font-family: Geist; src: url("../store-template/fonts/Geist-Variable.woff2") format("woff2"); font-weight: 100 900; }
+@font-face { font-family: "Geist Mono"; src: url("../store-template/fonts/GeistMono-Variable.woff2") format("woff2"); font-weight: 100 900; }
+* { box-sizing: border-box; margin: 0; }
+html, body { width: 1920px; height: 1080px; overflow: hidden; }
+body { font-family: Geist, sans-serif; background: #F6F7F9; -webkit-font-smoothing: antialiased; color: #12151B; }
+#stage { position: absolute; inset: 0; overflow: hidden; }
+#bgdark { position: absolute; inset: 0; background: #0C0E12; opacity: 0; }
+
+/* intro text */
+.intro { position: absolute; left: 0; right: 0; text-align: center; font-weight: 600; letter-spacing: -.035em; }
+#i1 { top: 400px; font-size: 64px; color: #485063; }
+#i2 { top: 500px; font-size: 104px; }
+.w { display: inline-block; will-change: transform, opacity; }
+
+/* browser */
+#cam { position: absolute; inset: 0; transform-origin: 0 0; }
+#win { position: absolute; left: 160px; top: 70px; width: 1600px; height: 940px; border-radius: 18px; overflow: hidden; background: #fff;
+  box-shadow: 0 1px 2px rgba(18,21,27,.06), 0 40px 100px -24px rgba(18,21,27,.30); }
+#bar { position: absolute; left: 0; right: 0; top: 0; height: 64px; background: #DEE1E6; display: flex; align-items: center; gap: 14px; padding: 0 16px 0 22px; }
+.dots { display: flex; gap: 9px; margin-right: 10px; }
+.dots i { width: 13px; height: 13px; border-radius: 50%; background: #F25F58; }
+.dots i:nth-child(2) { background: #FBBE2E; } .dots i:nth-child(3) { background: #3BC840; }
+#omni { flex: 1; height: 40px; border-radius: 20px; background: #fff; display: flex; align-items: center; padding: 0 20px; font-size: 18px; color: #3C4043; }
+#omni .lock { width: 14px; height: 14px; margin-right: 12px; opacity: .55; }
+#caret { display: inline-block; width: 2px; height: 22px; background: #1A73E8; margin-left: 1px; }
+#ext { position: relative; width: 40px; height: 40px; border-radius: 50%; display: grid; place-items: center; }
+#ext img { position: absolute; width: 20px; height: 20px; left: 10px; top: 10px; }
+#badge { position: absolute; right: -4px; bottom: 0; min-width: 22px; height: 17px; padding: 0 5px; border-radius: 5px; background: #14171B; color: #fff;
+  font: 700 12px/17px Geist, sans-serif; text-align: center; box-shadow: 0 0 0 2px #DEE1E6; }
+#page { position: absolute; left: 0; right: 0; top: 64px; bottom: 0; background: #fff; padding: 64px 120px; }
+.sk { background: #EEF0F3; border-radius: 10px; }
+#veil { position: absolute; left: 0; right: 0; top: 64px; bottom: 0; background: #fff; }
+
+/* popup */
+#pop { position: absolute; left: 1180px; top: 134px; width: 560px; height: 800px; border-radius: 14px; overflow: hidden; background: #fff;
+  transform-origin: 92% 0; box-shadow: 0 0 0 1px rgba(18,21,27,.08), 0 30px 80px -20px rgba(18,21,27,.35); }
+#pop img { position: absolute; inset: 0; width: 560px; height: 800px; }
+.hl { position: absolute; border: 3px solid #0284C7; border-radius: 12px; box-shadow: 0 0 0 6px rgba(2,132,199,.15); opacity: 0; }
+
+/* captions */
+.cap { position: absolute; left: 260px; top: 380px; width: 820px; opacity: 0; }
+.cap .k { font: 500 20px/1 "Geist Mono", monospace; letter-spacing: .04em; text-transform: uppercase; color: #0284C7; margin-bottom: 26px; }
+.cap h2 { font-size: 76px; line-height: 1.04; letter-spacing: -.04em; font-weight: 600; max-width: 13ch; text-wrap: balance; }
+.cap p { margin-top: 26px; font-size: 26px; line-height: 1.45; color: #485063; max-width: 32ch; }
+.cap.dk h2 { color: #ECEEF3; } .cap.dk p { color: #AEB4C2; } .cap.dk .k { color: #38BDF8; }
+
+/* cursor + click ring */
+#cur { position: absolute; left: 0; top: 0; width: 30px; height: 30px; filter: drop-shadow(0 2px 3px rgba(0,0,0,.3)); }
+#ring { position: absolute; width: 56px; height: 56px; margin: -28px 0 0 -28px; border-radius: 50%; border: 3px solid #0284C7; opacity: 0; }
+
+/* end card */
+#end { position: absolute; inset: 0; display: grid; place-items: center; text-align: center; }
+#end .in { display: flex; flex-direction: column; align-items: center; }
+#logo { width: 168px; height: 168px; border-radius: 22%; box-shadow: 0 30px 70px -20px rgba(18,21,27,.45); }
+#name { margin-top: 34px; font-size: 96px; font-weight: 650; letter-spacing: -.045em; }
+#tag { margin-top: 8px; font-size: 40px; letter-spacing: -.025em; color: #485063; }
+#cta { margin-top: 52px; display: flex; align-items: center; gap: 14px; height: 76px; padding: 0 36px; border-radius: 38px; background: #0369A1; color: #fff; font-size: 28px; font-weight: 550; }
+#cta svg { width: 30px; height: 30px; }
+#url { margin-top: 24px; font: 500 24px/1 "Geist Mono", monospace; color: #646B7D; }
+</style></head>
+<body><div id="stage">
+  <div id="bgdark"></div>
+
+  <div id="i1" class="intro"></div>
+  <div id="i2" class="intro"></div>
+
+  <div id="cam">
+    <div id="win">
+      <div id="bar">
+        <div class="dots"><i></i><i></i><i></i></div>
+        <div id="omni"><svg class="lock" viewBox="0 0 24 24" fill="none" stroke="#3C4043" stroke-width="2.4"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg><span id="url-t"></span><span id="caret"></span></div>
+        <div id="ext"><img id="icDim" src="../dim-32.svg"><img id="icOn" src="../active-32.svg"><span id="badge">13</span></div>
+      </div>
+      <div id="page">
+        <div class="sk" style="width:220px;height:28px"></div>
+        <div style="display:flex;gap:28px;margin-top:-28px;margin-left:900px"><div class="sk" style="width:80px;height:16px;margin-top:6px"></div><div class="sk" style="width:80px;height:16px;margin-top:6px"></div><div class="sk" style="width:80px;height:16px;margin-top:6px"></div><div class="sk" style="width:80px;height:16px;margin-top:6px"></div></div>
+        <div class="sk" style="width:780px;height:64px;margin-top:110px"></div>
+        <div class="sk" style="width:560px;height:64px;margin-top:18px"></div>
+        <div class="sk" style="width:640px;height:18px;margin-top:40px"></div>
+        <div class="sk" style="width:520px;height:18px;margin-top:14px"></div>
+        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:28px;margin-top:70px">
+          <div class="sk" style="height:300px"></div><div class="sk" style="height:300px"></div><div class="sk" style="height:300px"></div>
+        </div>
+      </div>
+      <div id="veil"></div>
+    </div>
+
+    <div id="pop">
+      <img id="p0" src="../store-template/pop/overview.png">
+      <img id="p1" src="../store-template/pop/plugins.png">
+      <img id="p2" src="../store-template/pop/stack.png">
+      <img id="p3" src="../store-template/pop/checks2.png">
+      <img id="p4" src="../store-template/pop/dark-overview.png">
+      <div class="hl" id="h0" style="left:68px;top:42px;width:340px;height:40px"></div>
+      <div class="hl" id="h1" style="left:414px;top:288px;width:134px;height:48px"></div>
+      <div class="hl" id="h3" style="left:8px;top:596px;width:544px;height:48px"></div>
+    </div>
+  </div>
+
+  <div class="cap" id="c0"><div class="k">One click</div><h2>Is it WordPress? What's it built with?</h2><p>Version, theme, page builder and host, the moment you open it.</p></div>
+  <div class="cap" id="c1"><div class="k">Plugins</div><h2>Every plugin, with its version</h2><p>See which ones have an update waiting on WordPress.org.</p></div>
+  <div class="cap" id="c2"><div class="k">Stack</div><h2>Hosting, DNS and the tech stack</h2><p>Server, cache, IP and nameservers, content counts, analytics tags.</p></div>
+  <div class="cap" id="c3"><div class="k">Checks</div><h2>Security and SEO in one tab</h2><p>Exposed users, missing headers, outdated plugins and more.</p></div>
+  <div class="cap dk" id="c4"><div class="k">Themes</div><h2>Light or dark, your call</h2><p>Follows your system, or pick one from the menu.</p></div>
+
+  <div id="end"><div class="in">
+    <img id="logo" src="../logo.svg">
+    <div id="name">WPScout</div>
+    <div id="tag">See how any WordPress site is built</div>
+    <div id="cta"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9.5"/><circle cx="12" cy="12" r="4"/><path d="M12 8h9M8.5 14 4 6.5M15.5 14 11 21.5"/></svg>Add it from the Chrome Web Store</div>
+    <div id="url">parag.xyz/WPScout</div>
+  </div></div>
+
+  <svg id="cur" viewBox="0 0 24 24"><path d="M5 2.5v17.2l4.6-4.4 3 6.6 3-1.4-3-6.4h6.3Z" fill="#12151B" stroke="#fff" stroke-width="1.6" stroke-linejoin="round"/></svg>
+  <div id="ring"></div>
+</div>
+
+<script>
+const DURATION = 32;
+const $ = (id) => document.getElementById(id);
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+const prog = (t, a, b) => clamp((t - a) / (b - a));
+const lerp = (a, b, p) => a + (b - a) * p;
+const outCubic = (p) => 1 - Math.pow(1 - p, 3);
+const outQuint = (p) => 1 - Math.pow(1 - p, 5);
+const inOut = (p) => p < .5 ? 4 * p * p * p : 1 - Math.pow(-2 * p + 2, 3) / 2;
+const outBack = (p) => { const c = 1.5; return 1 + (c + 1) * Math.pow(p - 1, 3) + c * Math.pow(p - 1, 2); };
+// fade in over [a, a+d], out over [b-d, b]
+const window_ = (t, a, b, d = .45) => Math.min(outCubic(prog(t, a, a + d)), 1 - inOut(prog(t, b - d, b)));
+const mix = (c1, c2, p) => { const h = (c) => c.match(/\w\w/g).map((x) => parseInt(x, 16)); const A = h(c1), B = h(c2);
+  return `rgb(${A.map((v, i) => Math.round(lerp(v, B[i], p))).join(',')})`; };
+
+// split intro lines into words once
+const words = (el, text) => { el.innerHTML = text.split(' ').map((w) => `<span class="w">${w}</span>`).join(' '); return [...el.children]; };
+const W1 = words($('i1'), 'Found a great WordPress site?');
+const W2 = words($('i2'), "What's it built with?");
+
+// Timeline (seconds)
+const URL_TEXT = 'wordpress.org/news';
+const TYPE = [4.4, 5.6];
+const ICON_ON = 6.15;
+const OPEN = 7.35;
+const CLICKS = [ // cursor path: [time to arrive, x, y, click?]
+  [3.9, 980, 1140, false], [6.4, 980, 760, false], [7.15, 1724, 108, true],     // to extension icon
+  [9.6, 1724, 108, false], [11.7, 1356, 252, true],                             // Plugins tab
+  [15.4, 1356, 252, false], [15.95, 1450, 252, true],                           // Stack tab
+  [19.4, 1450, 252, false], [19.95, 1545, 252, true],                           // Checks tab
+  [23.4, 1545, 252, false], [24.2, 1700, 520, false],
+];
+const SCREENS = [[0, 0], [1, 11.75], [2, 16.0], [3, 20.0], [4, 24.0]]; // popup image, from
+const CAPS = [[0, 8.1, 11.45], [1, 12.15, 15.55], [2, 16.3, 19.55], [3, 20.3, 23.55], [4, 24.35, 27.0]];
+const HL = [['h0', 8.9, 11.4], ['h1', 13.0, 15.5], ['h3', 21.2, 23.5]];
+const DARK = [23.7, 24.5];
+const END = 27.0;
+
+function cursorAt(t) {
+  if (t <= CLICKS[0][0]) return { x: CLICKS[0][1], y: CLICKS[0][2] };
+  for (let i = 1; i < CLICKS.length; i++) {
+    const [t1, x1, y1] = CLICKS[i], [t0, x0, y0] = CLICKS[i - 1];
+    if (t <= t1) { const p = inOut(prog(t, t0, t1)); return { x: lerp(x0, x1, p), y: lerp(y0, y1, p) }; }
+  }
+  const l = CLICKS[CLICKS.length - 1]; return { x: l[1], y: l[2] };
+}
+
+function seek(t) {
+  // ---- intro
+  const introOut = inOut(prog(t, 3.0, 3.6));
+  W1.forEach((w, i) => { const p = outCubic(prog(t, .25 + i * .09, .85 + i * .09));
+    w.style.opacity = p * (1 - introOut); w.style.transform = `translateY(${(1 - p) * 30 - introOut * 40}px)`; });
+  W2.forEach((w, i) => { const p = outQuint(prog(t, 1.2 + i * .12, 1.9 + i * .12));
+    w.style.opacity = p * (1 - introOut); w.style.transform = `translateY(${(1 - p) * 50 - introOut * 40}px) scale(${lerp(.94, 1, p)})`; });
+
+  // ---- browser window entrance + camera
+  const enter = outQuint(prog(t, 3.25, 4.35));
+  const endOut = inOut(prog(t, END, END + .8));
+  const camScale = 1 - .06 * endOut;
+  $('cam').style.opacity = enter * (1 - endOut);
+  $('cam').style.transform = `translateY(${(1 - enter) * 700 + endOut * 60}px) scale(${camScale})`;
+  $('cam').style.transformOrigin = '960px 540px';
+
+  // ---- url typing
+  const n = Math.round(prog(t, TYPE[0], TYPE[1]) * URL_TEXT.length);
+  $('url-t').textContent = URL_TEXT.slice(0, n);
+  $('caret').style.opacity = (t < TYPE[1] + .3 && (t < TYPE[0] || t < TYPE[1] || Math.floor(t * 2.5) % 2 === 0)) && t > 3.6 ? 1 : 0;
+
+  // page loads after "enter"
+  const load = outCubic(prog(t, 5.75, 6.25));
+  // veil: white until page loads, then dims the page under captions
+  const dimIn = outCubic(prog(t, 7.7, 8.3));
+  $('veil').style.background = 'rgba(255,255,255,' + Math.max(1 - load, .82 * dimIn).toFixed(3) + ')';
+
+  // ---- extension icon
+  const on = prog(t, ICON_ON, ICON_ON + .25);
+  $('icOn').style.opacity = on; $('icDim').style.opacity = 1 - on;
+  const bp = prog(t, ICON_ON + .1, ICON_ON + .55);
+  $('badge').style.opacity = bp > 0 ? 1 : 0;
+  $('badge').style.transform = `scale(${bp > 0 ? outBack(bp) : 0})`;
+  const hover = t > 7.0 && t < OPEN + .4;
+  $('ext').style.background = hover ? 'rgba(0,0,0,.10)' : 'transparent';
+
+  // ---- dark mode colours
+  const dk = inOut(prog(t, DARK[0], DARK[1]));
+  $('bgdark').style.opacity = dk;
+  $('win').style.background = mix('ffffff', '202124', dk);
+  $('page').style.background = mix('ffffff', '202124', dk);
+  $('bar').style.background = mix('DEE1E6', '35363A', dk);
+  $('omni').style.background = mix('ffffff', '202124', dk);
+  $('omni').style.color = mix('3C4043', 'E8EAED', dk);
+  $('badge').style.boxShadow = `0 0 0 2px ${mix('DEE1E6', '35363A', dk)}`;
+  document.querySelectorAll('.sk').forEach((s) => s.style.background = mix('EEF0F3', '2C2E33', dk));
+  if (dk > 0) $('veil').style.background = `rgba(${Math.round(lerp(255, 12, dk))},${Math.round(lerp(255, 14, dk))},${Math.round(lerp(255, 18, dk))},.86)`;
+  $('pop').style.background = mix('ffffff', '15171C', dk);
+
+  // ---- popup
+  const po = outQuint(prog(t, OPEN, OPEN + .5));
+  $('pop').style.opacity = clamp(po * 1.6);
+  $('pop').style.transform = `translateY(${(1 - po) * -14}px) scale(${lerp(.94, 1, po)})`;
+  // images are stacked in order, so each later screen simply fades in over the earlier ones
+  SCREENS.forEach(([i, from]) => {
+    $('p' + i).style.opacity = i === 0 ? 1 : outCubic(prog(t, from, from + (i === 4 ? .7 : .22)));
+  });
+  HL.forEach(([id, a, b]) => { const w = window_(t, a, b, .35); $(id).style.opacity = w; $(id).style.transform = `scale(${lerp(1.04, 1, outCubic(prog(t, a, a + .35)))})`; });
+
+  // ---- captions
+  CAPS.forEach(([i, a, b]) => { const pin = outQuint(prog(t, a, a + .6)), pout = inOut(prog(t, b - .4, b));
+    const el = $('c' + i); el.style.opacity = Math.min(pin, 1 - pout);
+    el.style.transform = `translateY(${(1 - pin) * 36 - pout * 24}px)`; });
+
+  // ---- cursor
+  const c = cursorAt(t);
+  const curVis = Math.min(outCubic(prog(t, 3.9, 4.4)), 1 - outCubic(prog(t, 24.3, 24.8)));
+  let press = 0;
+  CLICKS.forEach(([ct, , , click]) => { if (click) press = Math.max(press, 1 - Math.abs(t - (ct + .12)) / .12); });
+  $('cur').style.opacity = clamp(curVis);
+  $('cur').style.transform = `translate(${c.x - 7}px, ${c.y - 4}px) scale(${1 - .14 * clamp(press)})`;
+  let ring = 0, rp = 0, rx = 0, ry = 0;
+  CLICKS.forEach(([ct, x, y, click]) => { if (click && t >= ct + .1 && t < ct + .7) { rp = prog(t, ct + .1, ct + .7); ring = 1; rx = x; ry = y; } });
+  $('ring').style.opacity = ring ? (1 - rp) * .9 : 0;
+  $('ring').style.left = rx + 'px'; $('ring').style.top = ry + 'px';
+  $('ring').style.transform = `scale(${lerp(.4, 1.5, outCubic(rp))})`;
+
+  // ---- end card (light again)
+  const lightBack = inOut(prog(t, END, END + .8));
+  if (lightBack > 0) $('bgdark').style.opacity = dk * (1 - lightBack);
+  const e = (a, d = .7) => outQuint(prog(t, END + a, END + a + d));
+  const set = (id, p, dy = 30, s0 = 1) => { $(id).style.opacity = p; $(id).style.transform = `translateY(${(1 - p) * dy}px) scale(${lerp(s0, 1, p)})`; };
+  $('end').style.display = t >= END ? 'grid' : 'none';
+  const lp = prog(t, END + .5, END + 1.2);
+  $('logo').style.opacity = clamp(lp * 2); $('logo').style.transform = `scale(${lp > 0 ? lerp(.6, 1, outBack(lp)) : .6}) rotate(${(1 - outCubic(lp)) * -8}deg)`;
+  set('name', e(.8)); set('tag', e(1.0)); set('cta', e(1.4), 20, .96); set('url', e(1.7), 14);
+}
+
+window.seek = seek; window.DURATION = DURATION;
+const qt = new URLSearchParams(location.search).get('t');
+if (qt !== null) seek(parseFloat(qt));
+else { // live preview loop
+  const t0 = performance.now();
+  const tick = () => { seek(((performance.now() - t0) / 1000) % DURATION); requestAnimationFrame(tick); };
+  document.fonts.ready.then(tick);
+}
+</script>
+</body></html>
